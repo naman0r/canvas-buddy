@@ -16,13 +16,18 @@ def main():
     packages = {p["name"]: p for p in tomllib.loads((root / "uv.lock").read_text())["package"]}
     if packages["canvas-buddy"]["version"] != version:
         raise SystemExit("Release version does not match uv.lock")
-    selected = set()
-    def visit(name):
-        if name in selected:
+    selected, expanded = set(), set()
+    def visit(name, extras=()):
+        key = (name, tuple(sorted(extras)))
+        if key in expanded:
             return
+        expanded.add(key)
         selected.add(name)
-        for dependency in packages[name].get("dependencies", []):
-            visit(dependency["name"])
+        dependencies = list(packages[name].get("dependencies", []))
+        for extra in extras:
+            dependencies += packages[name].get("optional-dependencies", {}).get(extra, [])
+        for dependency in dependencies:
+            visit(dependency["name"], dependency.get("extra", []))
     visit("canvas-buddy")
     url = f"https://github.com/naman0r/canvas-buddy/archive/refs/tags/v{version}.tar.gz"
     with urlopen(url, timeout=90) as response:
