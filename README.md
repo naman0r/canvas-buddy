@@ -13,6 +13,8 @@ brew install naman0r/tap/canvas-buddy
 canvas-buddy
 ```
 
+Prebuilt Homebrew packages support Apple Silicon on macOS 14+ and Intel on macOS 15+.
+
 No Python setup, repository clone, `.env` file, or Ollama installation is required for keyword search. Homebrew installs the Python runtime and application dependencies.
 
 For model answers, install and sign into one supported CLI before asking a question:
