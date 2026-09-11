@@ -1,0 +1,31 @@
+name: Tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.11', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install uv==0.12.10
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+      - run: uv run ruff check canvas_rag tests
+      - run: uv build
+      - name: Check installed wheel outside checkout
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/canvas-buddy-install"
+          "$RUNNER_TEMP/canvas-buddy-install/bin/pip" install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/canvas-buddy-install/bin/canvas-buddy" --version
+          "$RUNNER_TEMP/canvas-buddy-install/bin/canvas-buddy" self-test

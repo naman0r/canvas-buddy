@@ -1,4 +1,4 @@
-# Canvas RAG implementation plan
+# Canvas Buddy implementation plan
 
 1. Read-only Canvas client: paginated/retried requests, course selection, syllabus, assignments and personal submissions/feedback, grades and weighting, announcements, pages, modules, discussions, quizzes, calendar, files and personal inbox.
 2. Private local SQLite cache: original records, searchable chunks, FTS5 + Ollama vectors, incremental embedding reuse, atomic per-resource sync, visible coverage/failures, removal of deselected courses.

@@ -1,109 +1,148 @@
 # Canvas Buddy
 
-A small, local terminal companion for Canvas LMS. Choose your classes, sync once, and ask questions with links back to the source. MIT licensed. No hosted backend, vector service, agent framework, or API key for chat when using an authenticated subscription CLI.
+Ask questions about your Canvas classes from a small terminal app. Answers link back to the source. Browse syllabi, announcements, assignments, grades, pages and files without opening a dozen tabs.
 
-## Run
+MIT licensed. Local storage. Read-only Canvas access. Uses your existing Codex/OpenCode CLI login, or a local Ollama chat model.
 
-Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and an authenticated [Codex CLI](https://developers.openai.com/codex/noninteractive) or [OpenCode](https://opencode.ai/docs/cli/).
+## Install on macOS
+
+With [Homebrew](https://brew.sh) installed:
 
 ```sh
-cp .env.example .env
-# Set CANVAS_URL and CANVAS_PAT in .env
-uv sync
+brew install naman0r/tap/canvas-buddy
+canvas-buddy
+```
+
+No Python setup, repository clone, `.env` file, or Ollama installation is required for keyword search. Homebrew installs the Python runtime and application dependencies.
+
+For model answers, install and sign into one supported CLI before asking a question:
+
+- [Codex CLI](https://developers.openai.com/codex/cli): `brew install --cask codex`, then `codex login`. Use a current version supporting `exec --ignore-user-config --ephemeral` (verified with 0.153.4).
+- [OpenCode](https://opencode.ai): install using its instructions, then `opencode auth login`. Choose your provider/model in Canvas Buddy setup if needed. Availability and billing depend on that provider/account.
+- [Ollama](https://ollama.com): install/start it and pull a chat model appropriate for your computer. Choose `ollama` and that exact model name in setup. No model is automatically downloaded.
+
+Without a model CLI, you can still sync, browse, search, and inspect grades/deadlines. `canvas-buddy doctor` reports what is available and what needs setup.
+
+## First run
+
+1. Enter your school's **Canvas HTTPS URL**.
+2. Paste your **Canvas access token**. In Canvas: **Account → Settings → New Access Token**. Some schools disable personal tokens; those accounts cannot use this app without their institution enabling API access.
+3. Choose Codex, OpenCode, or Ollama. The model field is optional for CLI providers; Ollama needs an installed model name.
+4. Leave local embeddings unchecked for a lightweight start. Load courses, select classes with Space, then **Save & sync**.
+
+Setup saves your selection and credentials on this computer. Relaunch `canvas-buddy` from any directory. Open **Courses** or run `canvas-buddy setup` to change the selection. Unselected courses are removed locally after saving; nothing changes in Canvas.
+
+Try questions like:
+
+- “What is the attendance policy for Investments?”
+- “What assignments are due this week?”
+- “When is the midterm? Cite the syllabus.”
+
+Choose a class in the top dropdown when asking about “this class.” Your messages have a yellow accent; replies have a cyan accent. An animated status shows the current step and elapsed time, then returns to **Ready**. Cancel with Esc or the **Cancel** button.
+
+**Sync is manual.** Click Sync or press Ctrl+R for fresh data. Answers use cached timestamps and may be incomplete; follow the source links for important policies and deadlines.
+
+## Optional semantic search
+
+Keyword search works out of the box. To also match similar meanings:
+
+```sh
 ollama pull nomic-embed-text
-uv run canvas-rag
 ```
 
-The course picker reads your Canvas token from `.env` in the current directory, or the environment. Click **Load courses**, toggle the classes you want with Space, then **Save & sync**. Open **Courses** or `/setup` any time to replace the selection. Deselected courses are removed from the cache on the next successful authenticated sync.
-
-On Naman's homelab, setup is already saved. Run:
-
-```sh
-cd ~/developer/canvas-rag && uv run canvas-rag
-```
-
-Your messages have a yellow accent; Canvas Buddy replies have a cyan accent. While working, an animated status shows the current step and elapsed seconds. It distinguishes local retrieval from waiting for your model provider, notes when Ollama may be loading, and returns to **Ready** when finished. Use **Cancel** or Esc to stop a pending request.
-
-Ask “What did the professor say about attendance?”, “What's due this week?”, or “When is the investments exam?” Use the course selector to focus results. The cache works offline; model answers still need the selected provider. Sync is manual: press **Sync**, Ctrl+R, or type `/sync` when you want fresh data.
+Enable **Use local Ollama embeddings** in Courses setup and save/sync. The embedding model is about 274 MB. It runs locally and stores vectors in SQLite. No vector database server is needed. If Ollama fails, search falls back to keywords; `/status` reports embedding availability.
 
 ## Commands
 
-| TUI command | Purpose |
+| Command | Purpose |
 | --- | --- |
-| `/setup` | Connect and change selected courses |
-| `/sync` | Refresh content and embed changed text |
-| `/browse` or Ctrl+B | Read full cached documents by course and type |
-| `/search attendance` | Hybrid local search without a chat model call |
-| `/upcoming` | All dated assignments/events in the next 30 days |
-| `/overdue` | Past-due assignments without a submitted/graded/excused state |
-| `/grades` | Canvas-reported current/final grades; null means not posted |
-| `/status` | Counts, per-section freshness, failures and unextracted files |
-| `/provider codex [model]` | Use the existing Codex login; default provider |
-| `/provider opencode [provider/model]` | Use the existing OpenCode login |
-| `/provider ollama [model]` | Local answers; defaults to `qwen3.6:35b` |
+| `/setup` | Change Canvas connection, provider, embeddings, or courses |
+| `/sync` or Ctrl+R | Refresh content and embed changed text |
+| `/browse` or Ctrl+B | Read full cached documents |
+| `/search attendance` | Local search without calling a chat model |
+| `/upcoming` | Dated assignments/events in the next 30 days |
+| `/overdue` | Past-due assignments not submitted/graded/excused |
+| `/grades` | Canvas current/final grade values; null means not posted |
+| `/status` | Counts, timestamps, partial imports and unavailable files |
+| `/provider codex [model]` | Change the answer provider; also accepts opencode/ollama |
 | `/clear` | Forget the in-memory conversation |
-| Esc / Ctrl+Q | Cancel work / quit |
+| Ctrl+Q | Quit |
 
-CLI equivalents work without the TUI:
+CLI commands work too:
 
 ```sh
-uv run canvas-rag courses
-uv run canvas-rag setup --url https://school.instructure.com --courses 123,456
-uv run canvas-rag sync
-uv run canvas-rag ask --course 123 "What is the attendance policy?"
-uv run canvas-rag search "exam"
-uv run canvas-rag upcoming
-uv run canvas-rag grades
-uv run canvas-rag status
-uv run canvas-rag doctor
+canvas-buddy --version
+canvas-buddy doctor
+canvas-buddy self-test                       # Offline installation check
+canvas-buddy sync
+canvas-buddy ask --course 123 "When is the exam?"
+canvas-buddy search "attendance"
+canvas-buddy upcoming
+canvas-buddy grades
 ```
 
-`--provider` and `--model` override a CLI invocation. Set `CANVAS_RAG_PROVIDER` / `CANVAS_RAG_MODEL` in `.env` for an environment default. The TUI provider command saves a preference; environment values override that preference at next launch. Codex requires a recent CLI supporting `exec --ignore-user-config --ephemeral`.
+The legacy `canvas-rag` command remains available. `--provider` and `--model` override a single CLI invocation. Shell scripts can use `CANVAS_URL` / `CANVAS_PAT` and `canvas-buddy setup --courses 123,456`.
 
-## Coverage
+## Coverage and limits
+
+Imported when your account can access it:
 
 - Course details, HTML syllabus, instructor/TA names.
-- Assignments, personalized deadlines, submission state, scores, rubric assessments and submission comments.
+- Assignments with personalized deadlines, submission states, scores, rubric assessments and feedback.
 - Canvas enrollment grades and assignment-group weighting/rules.
-- Announcements, discussion topics and their accessible threads.
-- Pages, front page, module structure and module items.
-- Classic quiz metadata/descriptions and availability; no taking quizzes or revealing restricted questions.
-- Course calendar events: 180 days back through 365 days forward; all assignment dates are imported independently.
-- Course files, including files linked from modules/content when the Files tab is hidden. Text extraction for PDF, DOCX, PPTX, XLSX and common text formats. Files are capped at 25 MB; originals are not retained.
-- Inbox conversations explicitly associated with selected courses, fetched without marking them read.
+- Announcements, discussions and accessible threads.
+- Pages, front page, modules and linked content, even when the Pages/Files listing is hidden.
+- Classic quiz metadata and availability; course calendar events from 180 days ago through 365 days ahead. Assignment dates are imported independently.
+- Files: text from PDF, DOCX, PPTX, XLSX and common text formats. Download limit: 25 MB per file. Original files are not retained. Spreadsheet extraction is raw text, not formula evaluation.
+- Inbox conversations explicitly associated with selected courses, without marking them read.
 
-`/status` distinguishes complete endpoint snapshots, partial linked-content discovery, and failed endpoints. Partial listings cannot establish that every item was discovered. Files with unavailable text retain a visible source record.
+`/status` distinguishes complete endpoint snapshots, partial linked-content discovery, and failures. Some file records contain only metadata and a link because extraction or access failed.
 
-Canvas permissions still apply. Locked/unpublished materials, external LTI tools (publisher homework, Gradescope, Panopto, etc.), embedded remote websites, media, image-only documents and OCR aren't imported. New Quizzes may expose assignment metadata without their full external-tool content. XLSX extraction is raw cell/shared-string text, not a rendered spreadsheet or formula evaluation. Discussion/inbox visibility is what the API grants your account. Some courses keep work entirely outside Canvas, so an empty assignment list does not establish that nothing is due.
+Locked/unpublished materials, external publisher/LTI tools, Gradescope, Panopto, remote websites, audio/video, OCR and image-only documents are outside the current scope. New Quizzes may expose assignment metadata without the external tool's full content. An empty assignment list does not mean there is no work due. Model answers can be wrong or miss evidence.
 
-## How it works
+## Privacy
 
-`Canvas GET → SQLite documents/chunks → FTS5 + local Ollama vectors → selected excerpts → model CLI`
+Canvas requests are **GET only**. The app cannot submit work, post, change grades, or message classmates. The token is excluded from model prompts, subprocess environments and normal configuration. It is stored separately in `credentials.json`, bound to the Canvas URL, with owner-only permissions. This is local file protection, **not separate encryption**; use an encrypted computer and private OS account.
 
-Six direct runtime dependencies: Textual, HTTPX, Beautiful Soup, python-dotenv, NumPy, pypdf. SQLite/FTS5 comes with Python. [nomic-embed-text](https://ollama.com/library/nomic-embed-text) is approximately 274 MB. Vectors live in SQLite; NumPy cosine similarity and reciprocal rank fusion combine semantic and keyword matches. If Ollama is unavailable, keyword search remains usable and the status reports the missing embeddings.
+New installations store data under `~/.local/share/canvas-buddy` (`$XDG_DATA_HOME/canvas-buddy` on systems that set it). Existing `canvas-rag` installations retain their old directory. Set `CANVAS_BUDDY_HOME` to use another directory or Canvas account; the cache is bound to the original account to prevent mixing data. Back up this private directory with your normal encrypted backups.
 
-Changed text is rechunked; unchanged files and embeddings are reused. Each resource snapshot is committed atomically, including deletions. Failed endpoints retain previous snapshots and timestamps; successful sections remain cached if a sync is cancelled. The cache is bound to the Canvas host/account to prevent mixing identities. To change accounts, set a new `CANVAS_RAG_HOME`.
+**Local storage does not mean local inference with Codex/OpenCode.** Those providers receive your question, selected excerpts, relevant grade/date context and short conversation history under your existing account. Their own retention rules apply. Use Ollama chat for local inference too. The TUI keeps conversation history only in memory; external CLIs may keep their own logs.
 
-One model invocation per question, at most eight retrieved excerpts, a bounded structured snapshot for dates/grades, and three short recent conversation turns. Full course archives are not uploaded. Retrieved content is treated as evidence; prompts require source links and acknowledge missing coverage. Like any model, answers can still be wrong: follow the Canvas citations for important dates/policies.
+API pagination must stay on your Canvas origin. File downloads do not forward the PAT. Codex runs ephemerally with user configuration, host skill discovery and action tools disabled; OpenCode uses a tool-denied agent with sharing disabled. These restrictions reduce exposure; they are not a substitute for your provider's privacy/security policies.
 
-## Privacy and storage
+Environment variables override saved preferences: `CANVAS_URL`, `CANVAS_PAT`, `CANVAS_RAG_PROVIDER`, `CANVAS_RAG_MODEL`, `OLLAMA_URL`, and `CANVAS_RAG_EMBED_MODEL`. A `.env` in the current directory is also read for compatibility with development checkouts. To switch schools, use setup and provide the new token, or choose a new data directory.
 
-The app makes **GET requests only** to Canvas. It never submits work, posts, changes grades, or sends messages. The PAT stays out of model prompts, subprocess environments and saved configuration. API pagination must remain on your Canvas origin; file downloads follow HTTPS links without forwarding the PAT.
+## Updates and troubleshooting
 
-Data and embeddings are stored under `~/.local/share/canvas-rag` (override with `CANVAS_RAG_HOME`). The directory is private to your OS account; the SQLite cache is not separately encrypted. Back up that directory with your normal encrypted backups. `.env`, databases and virtual environments are ignored by Git. The TUI conversation is held in memory only.
+```sh
+brew update
+brew upgrade naman0r/tap/canvas-buddy
+canvas-buddy doctor
+canvas-buddy self-test
+```
 
-**Local storage is not local inference when using Codex/OpenCode.** Those CLIs send the question, selected course text, and relevant grade/date context to their model service under your existing account. They may retain their own logs/history. Codex runs ephemerally with user configuration, host skill discovery and action tools disabled; OpenCode uses a tool-denied agent and disables sharing. The app does not copy CLI credentials. For local inference too, select `/provider ollama qwen3.6:35b` (or another installed chat model).
+- **Canvas 401:** the token expired or is invalid. Open Courses and enter a fresh token.
+- **Canvas 403/404:** your account cannot access that endpoint, or the course hides it. Check `/status`; module links may recover some content.
+- **Model missing/login failure:** follow `doctor` instructions and verify the provider's own CLI works. Restart after installing a CLI or changing your shell PATH.
+- **No matching sources:** choose the correct course and sync. Optional embeddings improve semantic matches.
+- **Another sync is running:** let it finish or cancel it in the other app window.
 
-No server or scheduled job is installed. Stop with Ctrl+Q. To uninstall, remove this checkout and its virtual environment; remove the data directory separately if you want to erase cached course data. `ollama rm nomic-embed-text` removes the embedding model.
+`brew uninstall canvas-buddy` removes the app but keeps private data. Remove the data directory separately to erase tokens and cached classes. No daemon, scheduler, or automatic model download is installed.
 
 ## Development
 
+Python 3.11+ on macOS/Linux. Windows is not currently supported. The release formula uses Homebrew Python 3.13.
+
 ```sh
-uv sync
+git clone https://github.com/naman0r/canvas-buddy.git
+cd canvas-buddy
+uv sync --frozen
+uv run canvas-buddy
 uv run pytest -q
 uv run ruff check canvas_rag tests
+uv build
 ```
 
-Tests cover credential boundaries, pagination/retries, cache updates/deletion/rollback, identity isolation, retrieval scoping, deadlines, CLI adapters, and headless TUI interaction. Live Canvas/API permissions and provider subscriptions vary by account.
+Five runtime dependencies: Textual, HTTPX, Beautiful Soup, python-dotenv and pypdf. SQLite/FTS5, float-vector storage and similarity scoring use Python's standard library. Unchanged files and embeddings are reused; resource snapshots update atomically. Failed endpoints retain previous timestamps and cached data. Concurrent syncs are blocked.
 
-Inspired by [canvas-mcp](https://github.com/vishalsachdev/canvas-mcp). This is an independent, read-only implementation using the [Canvas REST API](https://developerdocs.instructure.com/services/canvas), with a local index and a terminal UI rather than a large MCP tool catalog. See [PLAN.md](PLAN.md) for the implementation plan.
+Inspired by [canvas-mcp](https://github.com/vishalsachdev/canvas-mcp), implemented independently against the [Canvas REST API](https://developerdocs.instructure.com/services/canvas). See [RELEASING.md](RELEASING.md) for the release/tap workflow.
