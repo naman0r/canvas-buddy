@@ -50,6 +50,21 @@ def main():
               '    EOS', '  end', '', '  test do',
               '    assert_match version.to_s, shell_output("#{bin}/canvas-buddy --version")',
               '    assert_match "Self-test passed", shell_output("#{bin}/canvas-buddy self-test")',
+              '    ENV["CANVAS_BUDDY_HOME"] = (testpath/"data").to_s',
+              '    (testpath/"check_ui.py").write <<~PYTHON',
+              '      import asyncio',
+              '      from canvas_rag.config import Config',
+              '      from canvas_rag.store import Store',
+              '      from canvas_rag.ui import CanvasApp, Setup',
+              '      async def check():',
+              '          config = Config.load()',
+              '          db = Store(config.home)',
+              '          async with CanvasApp(config, db).run_test(size=(90, 30)) as pilot:',
+              '              assert isinstance(pilot.app.screen, Setup)',
+              '          db.close()',
+              '      asyncio.run(check())',
+              '    PYTHON',
+              '    system libexec/"bin/python", testpath/"check_ui.py"',
               '  end', 'end', '']
     path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
