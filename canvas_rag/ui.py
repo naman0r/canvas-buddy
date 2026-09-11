@@ -1,11 +1,13 @@
 import asyncio
+from dataclasses import replace
+import shutil
 from time import monotonic
 
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Label, Markdown, Select, SelectionList, Static
+from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Markdown, Select, SelectionList, Static
 
 from .answer import answer
 from .canvas import Canvas, sync
@@ -29,57 +31,111 @@ course excerpts to their model service. Nothing is posted or submitted to Canvas
 class Setup(ModalScreen):
     CSS = """
     Setup { align: center middle; }
-    #setup-box { width: 90%; height: 85%; padding: 1 2; border: round $accent; background: $surface; }
-    SelectionList { height: 1fr; }
-    #setup-state { height: auto; max-height: 3; }
+    #setup-box { width: 95%; height: 95%; padding: 1 2; border: round $accent; background: $surface; }
+    #connection { height: 1fr; }
+    #courses { height: 1fr; display: none; }
+    #setup-state { height: auto; max-height: 4; }
+    #setup-buttons { height: 3; }
     """
+    BINDINGS = [("escape", "cancel_setup", "Cancel")]
 
     def compose(self):
+        c = self.app.config
         with Vertical(id="setup-box"):
-            yield Label("Connect Canvas · choose courses (Space toggles)")
-            yield Input(self.app.config.url, placeholder="https://school.instructure.com", id="url")
-            yield Button("Load courses", id="load", variant="primary")
-            yield Static("CANVAS_PAT is read from your .env/environment.", id="setup-state", markup=False)
+            yield Label("Canvas Buddy · Connect your classes")
+            with VerticalScroll(id="connection"):
+                yield Input(c.url, placeholder="https://your-school.instructure.com", id="url")
+                yield Input(password=True, placeholder="Canvas access token (blank keeps saved token)" if c.token
+                            else "Paste your Canvas access token", id="token")
+                yield Static("Canvas → Account → Settings → New Access Token.\n"
+                             "Saved on this computer in an owner-only file; never sent to your chat model.", markup=False)
+                yield Label("Answer provider (log in with its CLI first)")
+                yield Select([(f"{name}" + (" · not installed" if not shutil.which(name) else ""), name)
+                              for name in ("codex", "opencode", "ollama")], value=c.provider,
+                             allow_blank=False, id="provider")
+                yield Input(c.model, placeholder="Model (blank uses provider default; Ollama needs an installed model)", id="model")
+                yield Checkbox("Use local Ollama embeddings (optional)", value=bool(c.embed_model), id="embeddings")
+                yield Static("Keyword search works without Ollama. For embeddings: ollama pull nomic-embed-text\n"
+                             "Codex/OpenCode send selected course text to their model service.\n"
+                             "Need a CLI? Run canvas-buddy doctor for installation/login instructions.", markup=False)
+            yield Static("Enter your Canvas URL and token, then load courses.", id="setup-state", markup=False)
             yield SelectionList(id="courses")
-            with Horizontal():
-                yield Button("Save & sync", id="save", variant="success")
+            with Horizontal(id="setup-buttons"):
+                yield Button("Load courses", id="load", variant="primary")
+                yield Button("Back", id="back", disabled=True)
+                yield Button("Save & sync", id="save", variant="success", disabled=True)
                 yield Button("Cancel", id="cancel")
 
     @on(Button.Pressed, "#load")
     @work(exclusive=True)
     async def load_courses(self):
-        self.query_one("#setup-state", Static).update("Loading courses…")
-        old = self.app.config.url
-        self.app.config.url = self.query_one("#url", Input).value.strip().rstrip("/")
+        self.query_one("#load", Button).disabled = True
+        self.query_one("#setup-state", Static).update("Connecting to Canvas…")
+        c = self.app.config
+        url = self.query_one("#url", Input).value.strip().rstrip("/").removesuffix("/api/v1")
+        typed_token = self.query_one("#token", Input).value.strip()
+        self.draft = replace(c, url=url, token=typed_token or (c.token if url == c.url else ""),
+                             provider=self.query_one("#provider", Select).value,
+                             model=self.query_one("#model", Input).value.strip(),
+                             embed_model=(c.embed_model or "nomic-embed-text")
+                             if self.query_one("#embeddings", Checkbox).value else "")
         try:
-            async with Canvas(self.app.config) as api:
+            if self.draft.provider == "ollama" and not self.draft.model:
+                raise ValueError("Enter an installed Ollama chat model name (run ollama list).")
+            async with Canvas(self.draft) as api:
+                profile = await api.one("users/self/profile")
+                self.user_id = str(profile["id"])
+                self.app.db.check_identity(url, self.user_id)
                 courses = await api.courses()
             choices = self.query_one(SelectionList)
             choices.clear_options()
-            for c in courses:
-                if c.get("name"):
-                    choices.add_option((f"{c['name']} ({c['id']})", c["id"], c["id"] in self.app.config.courses))
-            self.loaded_url = self.app.config.url
-            self.query_one("#setup-state", Static).update("Choose the classes to keep locally. Save replaces your selection.")
+            for course in courses:
+                if course.get("name"):
+                    choices.add_option((f"{course['name']} ({course['id']})", course["id"],
+                                        course["id"] in c.courses and url == c.url))
+            self.query_one("#connection").display = False
+            choices.display = True
+            choices.focus()
+            self.query_one("#load").display = False
+            self.query_one("#back", Button).disabled = False
+            self.query_one("#save", Button).disabled = False
+            self.query_one("#setup-state", Static).update("Select courses with Space, then Save & sync. Unselected courses are removed locally.")
         except Exception as e:
-            self.query_one("#setup-state", Static).update(str(e))
+            message = str(e).replace(self.draft.token, "[redacted]") if self.draft.token else str(e)
+            self.query_one("#setup-state", Static).update(message)
         finally:
-            self.app.config.url = old
+            self.query_one("#load", Button).disabled = False
+
+    @on(Button.Pressed, "#back")
+    def back(self):
+        self.query_one("#connection").display = True
+        self.query_one("#courses").display = False
+        self.query_one("#load").display = True
+        self.query_one("#save", Button).disabled = True
+        self.query_one("#back", Button).disabled = True
 
     @on(Button.Pressed, "#save")
     def save(self):
         selected = self.query_one(SelectionList).selected
-        url = self.query_one("#url", Input).value.strip().rstrip("/")
-        if not selected or getattr(self, "loaded_url", None) != url:
-            self.query_one("#setup-state", Static).update("Load courses from this URL, then choose at least one.")
+        if not selected:
+            self.query_one("#setup-state", Static).update("Select at least one course.")
             return
-        self.app.config.url = url
-        self.app.config.courses = selected
-        self.app.config.save()
+        try:
+            self.draft.courses = list(selected)
+            self.app.db.bind(self.draft.url, self.user_id)
+            self.draft.save_token()
+            self.draft.save()
+            self.app.db.prune_courses(selected)
+        except (OSError, ValueError) as e:
+            self.query_one("#setup-state", Static).update(str(e))
+            return
+        self.app.config = self.draft
+        self.app.history.clear()
         self.dismiss(True)
 
     @on(Button.Pressed, "#cancel")
-    def cancel(self):
+    def action_cancel_setup(self):
+        self.workers.cancel_all()
         self.dismiss(False)
 
 
@@ -140,9 +196,10 @@ class CanvasApp(App):
     BINDINGS = [("ctrl+q", "quit", "Quit"), ("escape", "cancel", "Cancel"),
                 ("ctrl+r", "refresh", "Sync"), ("ctrl+b", "browse", "Browse")]
 
-    def __init__(self, config, db):
+    def __init__(self, config, db, setup=False):
         super().__init__()
         self.config, self.db = config, db
+        self.start_setup = setup
         self.history = []
         self.busy = False
         self.status_text = ""
@@ -171,7 +228,7 @@ class CanvasApp(App):
         await self.say(HELP)
         self.set_status(f"Ready · {self.config.provider} · {len(self.db.documents())} cached documents")
         self.query_one("#question", Input).focus()
-        if not self.config.courses:
+        if self.start_setup or not self.config.courses:
             self.show_setup()
 
     def refresh_courses(self):
@@ -222,7 +279,7 @@ class CanvasApp(App):
 
     def show_setup(self):
         if not self.busy:
-            self.push_screen(Setup(), lambda saved: self.run_sync() if saved else None)
+            self.push_screen(Setup(), lambda saved: self.run_sync() if saved else self.query_one("#question", Input).focus())
 
     @on(Button.Pressed)
     def button(self, event):

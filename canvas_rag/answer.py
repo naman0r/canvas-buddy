@@ -10,6 +10,8 @@ from pathlib import Path
 
 import httpx
 
+from .diagnostics import GUIDANCE
+
 
 async def generate(config, prompt):
     if config.provider == "ollama":
@@ -23,7 +25,7 @@ async def generate(config, prompt):
         raise ValueError("Choose codex, opencode, or ollama")
     binary = shutil.which(config.provider)
     if not binary:
-        raise RuntimeError(f"{config.provider} is not installed or not on PATH")
+        raise RuntimeError(f"{config.provider} is not installed or not on PATH. {GUIDANCE[config.provider]}")
     # Never expose the Canvas token to the model process or its inherited environment.
     env = {k: v for k, v in os.environ.items() if not k.startswith("CANVAS_")}
     with tempfile.TemporaryDirectory(prefix="canvas-rag-") as tmp:
@@ -88,7 +90,8 @@ async def generate(config, prompt):
 async def answer(config, db, question, course=None, history=(), progress=lambda text: None):
     if not db.documents(course):
         return "No cached course data yet. Run /setup, then /sync.", []
-    progress("Searching your courses (local embeddings may be loading)…")
+    progress("Searching your courses (local embeddings may be loading)…" if config.embed_model
+             else "Searching your courses (keyword search)…")
     query = " ".join([q for q, _ in history[-2:]] + [question])
     hits = await db.search(query, config, course, limit=8)
     sources = [{"title": h["title"], "url": h["url"], "kind": h["kind"], "course": h["course"],

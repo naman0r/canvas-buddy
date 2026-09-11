@@ -1,11 +1,12 @@
 import hashlib
+from array import array
+from math import sqrt
 import json
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import httpx
-import numpy as np
 
 
 class Store:
@@ -37,13 +38,15 @@ class Store:
     def close(self):
         self.conn.close()
 
-    def bind(self, url, user):
+    def check_identity(self, url, user):
         identity = json.dumps([url, user])
         old = self.conn.execute("SELECT value FROM meta WHERE key='identity'").fetchone()
         if old and old[0] != identity:
-            raise ValueError("Cache belongs to a different Canvas account. Use a new CANVAS_RAG_HOME.")
+            raise ValueError("Cache belongs to a different Canvas account. Use a new CANVAS_BUDDY_HOME.")
+    def bind(self, url, user):
+        self.check_identity(url, user)
         with self.conn:
-            self.conn.execute("INSERT OR REPLACE INTO meta VALUES('identity',?)", (identity,))
+            self.conn.execute("INSERT OR REPLACE INTO meta VALUES('identity',?)", (json.dumps([url, user]),))
 
     def prune_courses(self, courses):
         allowed = set(courses) | {0}
@@ -52,8 +55,10 @@ class Store:
                 if row[0] not in allowed:
                     self.conn.execute("DELETE FROM documents WHERE course=?", (row[0],))
                     self.conn.execute("DELETE FROM coverage WHERE course=?", (row[0],))
-            # Inbox is scoped to the selection and must not survive a selection change.
-            self.conn.execute("DELETE FROM documents WHERE kind='inbox'")
+            # Remove only deselected conversations; retain selected ones if inbox sync fails.
+            for row in self.conn.execute("SELECT id,raw FROM documents WHERE kind='inbox'").fetchall():
+                if json.loads(row["raw"]).get("context_code") not in {f"course_{i}" for i in courses}:
+                    self.conn.execute("DELETE FROM documents WHERE id=?", (row["id"],))
 
     def replace(self, course, kind, records):
         now = datetime.now(timezone.utc).isoformat()
@@ -107,6 +112,9 @@ class Store:
         return "\n".join(lines)
 
     async def embed(self, config, progress=lambda s: None):
+        if not config.embed_model:
+            self.coverage(0, "embeddings", "ok", "Disabled; using keyword search")
+            return
         rows = self.conn.execute("SELECT id,text FROM chunks WHERE vector IS NULL OR model!=?",
                                  (config.embed_model,)).fetchall()
         try:
@@ -122,7 +130,7 @@ class Store:
                     with self.conn:
                         for row, vec in zip(batch, vectors):
                             self.conn.execute("UPDATE chunks SET vector=?,model=? WHERE id=?",
-                                (np.asarray(vec, dtype=np.float32).tobytes(), config.embed_model, row["id"]))
+                                (array("f", vec).tobytes(), config.embed_model, row["id"]))
                     progress(f"Embedded {min(offset + 24, len(rows))}/{len(rows)} changed chunks")
             self.coverage(0, "embeddings", "ok", f"{len(rows)} chunks updated")
         except (httpx.HTTPError, ValueError, KeyError):
@@ -144,27 +152,29 @@ class Store:
                 key = row[0]
                 hits[key] = dict(row)
                 scores[key] = 1 / (30 + rank)
-        try:
-            async with httpx.AsyncClient(timeout=12) as client:
-                r = await client.post(config.ollama + "/api/embed", json={"model": config.embed_model,
-                    "input": "search_query: " + question})
-                r.raise_for_status()
-                q = np.asarray(r.json()["embeddings"][0], dtype=np.float32)
-            rows = self.conn.execute("""SELECT c.id,c.text,c.vector,d.* FROM chunks c
-                JOIN documents d ON d.id=c.doc WHERE c.model=? AND c.vector IS NOT NULL
-                AND (? IS NULL OR d.course=?)""", (config.embed_model, course, course)).fetchall()
-            ranked = []
-            for row in rows:
-                v = np.frombuffer(row["vector"], dtype=np.float32)
-                if v.shape == q.shape:
-                    similarity = float(v @ q / max(float(np.linalg.norm(v) * np.linalg.norm(q)), 1e-9))
-                    ranked.append((similarity, row))
-            for rank, (_, row) in enumerate(sorted(ranked, key=lambda x: x[0], reverse=True)[:60]):
-                key = row[0]
-                hits[key] = dict(row)
-                scores[key] = scores.get(key, 0) + 1 / (30 + rank)
-        except (httpx.HTTPError, ValueError, KeyError):
-            pass
+        if config.embed_model:
+            try:
+                async with httpx.AsyncClient(timeout=12) as client:
+                    r = await client.post(config.ollama + "/api/embed", json={"model": config.embed_model,
+                        "input": "search_query: " + question})
+                    r.raise_for_status()
+                    q = r.json()["embeddings"][0]
+                    qnorm = sqrt(sum(x * x for x in q))
+                rows = self.conn.execute("""SELECT c.id,c.text,c.vector,d.* FROM chunks c
+                    JOIN documents d ON d.id=c.doc WHERE c.model=? AND c.vector IS NOT NULL
+                    AND (? IS NULL OR d.course=?)""", (config.embed_model, course, course)).fetchall()
+                ranked = []
+                for row in rows:
+                    v = array("f", row["vector"])
+                    if len(v) == len(q):
+                        similarity = sum(x * y for x, y in zip(v, q)) / max(sqrt(sum(x * x for x in v)) * qnorm, 1e-9)
+                        ranked.append((similarity, row))
+                for rank, (_, row) in enumerate(sorted(ranked, key=lambda x: x[0], reverse=True)[:60]):
+                    key = row[0]
+                    hits[key] = dict(row)
+                    scores[key] = scores.get(key, 0) + 1 / (30 + rank)
+            except (httpx.HTTPError, ValueError, KeyError):
+                pass
         out, per_doc = [], {}
         for key in sorted(scores, key=scores.get, reverse=True):
             hit = hits[key]

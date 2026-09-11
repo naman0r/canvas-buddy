@@ -1,6 +1,7 @@
 """Canvas GET requests only. Never forward the PAT to file hosts or foreign pagination links."""
 import asyncio
 import io
+import fcntl
 import json
 import re
 import zipfile
@@ -156,6 +157,15 @@ def record(course, kind, item, base, body=None):
 
 
 async def sync(config, db, progress=lambda s: None):
+    with (config.home / "sync.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Another Canvas Buddy sync is running. Wait for it to finish.") from None
+        await _sync(config, db, progress)
+
+
+async def _sync(config, db, progress):
     """Replace only complete resource snapshots; failed endpoints retain their previous data."""
     async with Canvas(config) as api:
         me = await api.one("users/self/profile")
