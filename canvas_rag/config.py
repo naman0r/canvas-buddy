@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import tempfile
+from ipaddress import ip_address
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -92,9 +93,23 @@ class Config:
     def save_token(self):
         private_json(self.home / "credentials.json", {"url": self.url, "token": self.token})
 
+    def error(self, error):
+        message = str(error) or type(error).__name__
+        return message.replace(self.token, "[redacted]") if self.token else message
+
     def validate_canvas(self):
         u = urlsplit(self.url)
         if u.scheme != "https" or not u.hostname or u.username or u.query or u.fragment or u.path not in ("", "/"):
             raise ValueError("Enter your Canvas HTTPS site URL, without a course path.")
         if not self.token:
             raise ValueError("Enter a Canvas access token in setup, or set CANVAS_PAT.")
+
+    def validate_ollama(self):
+        u = urlsplit(self.ollama)
+        try:
+            local = u.hostname == "localhost" or ip_address(u.hostname or "").is_loopback
+            valid_port = u.port is None or u.port > 0
+        except ValueError:
+            local = valid_port = False
+        if not (local and valid_port and u.scheme in {"http", "https"}) or u.username or u.query or u.fragment or u.path not in ("", "/"):
+            raise ValueError("Ollama must use a local address, such as http://127.0.0.1:11434. Check OLLAMA_URL.")

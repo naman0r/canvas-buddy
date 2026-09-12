@@ -14,10 +14,15 @@ from .diagnostics import GUIDANCE
 
 
 async def generate(config, prompt):
+    if config.token:
+        prompt = prompt.replace(config.token, "[redacted]")
     if config.provider == "ollama":
-        async with httpx.AsyncClient(timeout=240) as client:
+        config.validate_ollama()
+        if not config.model:
+            raise ValueError("Choose an installed Ollama chat model in Courses setup (run ollama list).")
+        async with httpx.AsyncClient(timeout=240, trust_env=False) as client:
             r = await client.post(config.ollama + "/api/chat", json={
-                "model": config.model or "qwen3.6:35b", "stream": False,
+                "model": config.model, "stream": False,
                 "messages": [{"role": "user", "content": prompt}], "think": False})
             r.raise_for_status()
             return r.json()["message"]["content"]
@@ -124,7 +129,7 @@ Recent conversation:
 User question: {question[:6000]}
 """
     if config.provider == "ollama":
-        progress(f"Waiting for Ollama ({config.model or 'qwen3.6:35b'}); model may be loading…")
+        progress(f"Waiting for Ollama ({config.model or 'no model selected'}); model may be loading…")
     else:
         progress(f"Waiting for {config.provider.capitalize()} to answer…")
     return await generate(config, prompt), sources

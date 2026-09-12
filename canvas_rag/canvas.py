@@ -79,7 +79,10 @@ class Canvas:
                 await asyncio.sleep(min(float(retry) if retry.isdigit() else 2 ** attempt, 20))
                 continue
             if r.status_code >= 300:
-                raise RuntimeError(f"Canvas HTTP {r.status_code}: {urlsplit(url).path}")
+                hint = {401: "Token expired or invalid. Create a new token in Canvas Account → Settings, then open Courses setup.",
+                        403: "Your account cannot access this resource; your school may restrict it.",
+                        404: "Resource unavailable; it may be unpublished, removed, or restricted."}.get(r.status_code, "Try syncing again later.")
+                raise RuntimeError(f"Canvas HTTP {r.status_code}: {urlsplit(url).path}. {hint}")
             try:
                 r.json()
             except ValueError:

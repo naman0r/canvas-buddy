@@ -1,6 +1,7 @@
 import struct
 import subprocess
 import sys
+from importlib.metadata import version
 
 import httpx
 import pytest
@@ -135,7 +136,7 @@ async def test_setup_cancel_does_not_change_configuration(fresh):
 
 
 def test_installed_cli_help_and_self_test_without_credentials(fresh):
-    for args, expected in [(('--version',), 'Canvas Buddy 0.2.0'),
+    for args, expected in [(('--version',), f"Canvas Buddy {version('canvas-buddy')}"),
                            (('self-test',), 'Self-test passed'), (('doctor',), 'canvas_pat_set')]:
         result = subprocess.run([sys.executable, '-m', 'canvas_rag', *args], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr

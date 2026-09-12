@@ -27,7 +27,8 @@ async def doctor(config, db):
         print("Start canvas-buddy and complete Courses setup with your own Canvas URL/token.")
     if config.embed_model or config.provider == "ollama":
         try:
-            async with httpx.AsyncClient(timeout=3) as client:
+            config.validate_ollama()
+            async with httpx.AsyncClient(timeout=3, trust_env=False) as client:
                 r = await client.get(config.ollama + "/api/tags")
                 r.raise_for_status()
                 models = [x["name"] for x in r.json()["models"]]

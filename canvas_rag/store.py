@@ -111,6 +111,18 @@ class Store:
         lines += [f"File text unavailable: {d['title']}" for d in skipped]
         return "\n".join(lines)
 
+    def snapshot_summary(self):
+        count, oldest = self.conn.execute("SELECT count(*),min(synced) FROM documents").fetchone()
+        issues = self.conn.execute("SELECT count(*) FROM coverage WHERE state != 'ok'").fetchone()[0]
+        files = sum(any(marker in d["body"] for marker in
+                        ("[Content not extracted:", "[Extraction failed:", "[No extractable text;", "[Content unavailable:"))
+                    for d in self.documents(kind="file"))
+        if not count:
+            return "No cached documents · Choose courses, then Sync"
+        date = datetime.fromisoformat(oldest).astimezone().strftime("%b %d, %H:%M %Z")
+        detail = f" · {issues} incomplete sections, {files} unreadable files" if issues or files else ""
+        return f"{count} documents · Oldest synced {date}{detail} · /status for details"
+
     async def embed(self, config, progress=lambda s: None):
         if not config.embed_model:
             self.coverage(0, "embeddings", "ok", "Disabled; using keyword search")
@@ -118,7 +130,8 @@ class Store:
         rows = self.conn.execute("SELECT id,text FROM chunks WHERE vector IS NULL OR model!=?",
                                  (config.embed_model,)).fetchall()
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            config.validate_ollama()
+            async with httpx.AsyncClient(timeout=180, trust_env=False) as client:
                 for offset in range(0, len(rows), 24):
                     batch = rows[offset:offset + 24]
                     r = await client.post(config.ollama + "/api/embed", json={"model": config.embed_model,
@@ -154,7 +167,8 @@ class Store:
                 scores[key] = 1 / (30 + rank)
         if config.embed_model:
             try:
-                async with httpx.AsyncClient(timeout=12) as client:
+                config.validate_ollama()
+                async with httpx.AsyncClient(timeout=12, trust_env=False) as client:
                     r = await client.post(config.ollama + "/api/embed", json={"model": config.embed_model,
                         "input": "search_query: " + question})
                     r.raise_for_status()

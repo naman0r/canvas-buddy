@@ -19,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description="Local Canvas study companion")
     parser.add_argument("--version", action="version", version=f"Canvas Buddy {version('canvas-buddy')}")
     parser.add_argument("command", nargs="?", default="tui", choices=[
-        "tui", "courses", "setup", "sync", "ask", "search", "status", "upcoming", "grades", "doctor", "self-test"])
+        "tui", "demo", "courses", "setup", "sync", "ask", "search", "status", "upcoming", "grades", "doctor", "self-test"])
     parser.add_argument("question", nargs="*")
     parser.add_argument("--url", help="Canvas HTTPS site URL")
     parser.add_argument("--courses", help="Comma-separated course IDs to cache")
@@ -29,6 +29,12 @@ def main():
     args = parser.parse_intermixed_args()
     if args.command == "self-test":
         asyncio.run(self_test())
+        return
+    if args.command == "demo":
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            parser.exit(1, "The demo needs an interactive terminal. Try canvas-buddy self-test instead.\n")
+        from .demo import run as run_demo
+        run_demo()
         return
     try:
         config = Config.load()
@@ -99,7 +105,7 @@ def main():
         else:
             asyncio.run(run())
     except (ValueError, RuntimeError, OSError, httpx.HTTPError) as e:
-        parser.exit(1, f"{e}\n")
+        parser.exit(1, f"{config.error(e)}\n")
     except KeyboardInterrupt:
         pass
     finally:

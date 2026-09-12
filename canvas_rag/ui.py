@@ -2,7 +2,9 @@ import asyncio
 from dataclasses import replace
 import shutil
 from time import monotonic
+from urllib.parse import unquote, urlsplit
 
+from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -42,17 +44,21 @@ class Setup(ModalScreen):
     def compose(self):
         c = self.app.config
         with Vertical(id="setup-box"):
-            yield Label("Canvas Buddy · Connect your classes")
+            yield Label("Canvas Buddy · Personal testing setup")
             with VerticalScroll(id="connection"):
+                yield Label("Canvas site URL")
                 yield Input(c.url, placeholder="https://your-school.instructure.com", id="url")
+                yield Label("Personal access token")
                 yield Input(password=True, placeholder="Canvas access token (blank keeps saved token)" if c.token
                             else "Paste your Canvas access token", id="token")
                 yield Static("Canvas → Account → Settings → New Access Token.\n"
+                             "Choose an expiry date. If New Access Token is missing, your school may disable tokens.\n"
                              "Saved on this computer in an owner-only file; never sent to your chat model.", markup=False)
                 yield Label("Answer provider (log in with its CLI first)")
                 yield Select([(f"{name}" + (" · not installed" if not shutil.which(name) else ""), name)
                               for name in ("codex", "opencode", "ollama")], value=c.provider,
                              allow_blank=False, id="provider")
+                yield Static("", id="provider-help", markup=False)
                 yield Input(c.model, placeholder="Model (blank uses provider default; Ollama needs an installed model)", id="model")
                 yield Checkbox("Use local Ollama embeddings (optional)", value=bool(c.embed_model), id="embeddings")
                 yield Static("Keyword search works without Ollama. For embeddings: ollama pull nomic-embed-text\n"
@@ -65,6 +71,13 @@ class Setup(ModalScreen):
                 yield Button("Back", id="back", disabled=True)
                 yield Button("Save & sync", id="save", variant="success", disabled=True)
                 yield Button("Cancel", id="cancel")
+
+    @on(Select.Changed, "#provider")
+    def provider_help(self):
+        from .diagnostics import GUIDANCE
+        name = self.query_one("#provider", Select).value
+        self.query_one("#provider-help", Static).update(
+            GUIDANCE[name] + "\nYou can sync, browse, and check deadlines before model login.")
 
     @on(Button.Pressed, "#load")
     @work(exclusive=True)
@@ -91,8 +104,11 @@ class Setup(ModalScreen):
             choices.clear_options()
             for course in courses:
                 if course.get("name"):
-                    choices.add_option((f"{course['name']} ({course['id']})", course["id"],
+                    choices.add_option((Text(f"{course['name']} ({course['id']})"), course["id"],
                                         course["id"] in c.courses and url == c.url))
+            if not choices.option_count:
+                self.query_one("#setup-state", Static).update("No student courses found. Check that this is your student Canvas account.")
+                return
             self.query_one("#connection").display = False
             choices.display = True
             choices.focus()
@@ -101,8 +117,7 @@ class Setup(ModalScreen):
             self.query_one("#save", Button).disabled = False
             self.query_one("#setup-state", Static).update("Select courses with Space, then Save & sync. Unselected courses are removed locally.")
         except Exception as e:
-            message = str(e).replace(self.draft.token, "[redacted]") if self.draft.token else str(e)
-            self.query_one("#setup-state", Static).update(message)
+            self.query_one("#setup-state", Static).update(self.draft.error(e))
         finally:
             self.query_one("#load", Button).disabled = False
 
@@ -140,6 +155,7 @@ class Setup(ModalScreen):
 
 
 class Browser(ModalScreen):
+    BINDINGS = [("escape", "close", "Close")]
     CSS = """
     Browser { align: center middle; }
     #browser { width: 95%; height: 95%; padding: 1; border: round $accent; background: $surface; }
@@ -154,11 +170,23 @@ class Browser(ModalScreen):
     def compose(self):
         with Vertical(id="browser"):
             yield Label("Cached Canvas sources")
-            yield Select([(f"{d['course']} · {d['kind']} · {d['title']}", d["id"])
+            yield Input(placeholder="Filter by title, type, or course…", id="doc-filter")
+            yield Select([(Text(f"{d['course']} · {d['kind']} · {d['title']}"), d["id"])
                           for d in self.docs.values()], prompt="Choose a document", id="doc-picker")
             with VerticalScroll(id="document"):
                 yield Static("Choose a document to read its full cached text.", id="document-text", markup=False)
-            yield Button("Close", id="close")
+            with Horizontal(classes="browser-buttons"):
+                yield Button("Open in Canvas", id="open-source", disabled=True)
+                yield Button("Close", id="close")
+
+    @on(Input.Changed, "#doc-filter")
+    def filter_documents(self, event):
+        words = event.value.casefold().split()
+        self.query_one("#doc-picker", Select).set_options([
+            (Text(f"{d['course']} · {d['kind']} · {d['title']}"), d["id"]) for d in self.docs.values()
+            if all(w in f"{d['course']} {d['kind']} {d['title']}".casefold() for w in words)])
+        self.query_one("#document-text", Static).update("Choose a matching document above.")
+        self.query_one("#open-source", Button).disabled = True
 
     @on(Select.Changed, "#doc-picker")
     def selected(self, event):
@@ -167,9 +195,16 @@ class Browser(ModalScreen):
             self.query_one("#document-text", Static).update(
                 f"{d['title']}\n{d['url']}\nSynced {d['synced']}\n\n{d['body']}")
             self.query_one("#document", VerticalScroll).scroll_home(animate=False)
+            self.query_one("#open-source", Button).disabled = False
+
+    @on(Button.Pressed, "#open-source")
+    def open_source(self):
+        doc = self.docs.get(self.query_one("#doc-picker", Select).value)
+        if doc:
+            self.app.open_source(doc["url"])
 
     @on(Button.Pressed, "#close")
-    def close(self):
+    def action_close(self):
         self.dismiss()
 
 
@@ -179,6 +214,8 @@ class CanvasApp(App):
     CSS = """
     Screen { background: $background; }
     #toolbar { height: 3; }
+    #shortcuts, .browser-buttons { height: 3; }
+    #snapshot { height: auto; max-height: 3; padding: 0 2; color: $text-muted; }
     #scope { width: 1fr; }
     #chat { height: 1fr; min-height: 0; padding: 0 2; }
     .message { margin: 1 0; padding: 0 1; border-left: thick $accent; height: auto; }
@@ -196,10 +233,11 @@ class CanvasApp(App):
     BINDINGS = [("ctrl+q", "quit", "Quit"), ("escape", "cancel", "Cancel"),
                 ("ctrl+r", "refresh", "Sync"), ("ctrl+b", "browse", "Browse")]
 
-    def __init__(self, config, db, setup=False):
+    def __init__(self, config, db, setup=False, demo=False):
         super().__init__()
         self.config, self.db = config, db
         self.start_setup = setup
+        self.demo = demo
         self.history = []
         self.busy = False
         self.status_text = ""
@@ -212,6 +250,11 @@ class CanvasApp(App):
             yield Button("Courses", id="setup")
             yield Button("Sync", id="sync")
             yield Button("Browse", id="browse")
+        with Horizontal(id="shortcuts"):
+            yield Button("Upcoming", id="upcoming")
+            yield Button("Grades", id="grades")
+            yield Button("Coverage", id="coverage")
+        yield Static("", id="snapshot", markup=False)
         yield VerticalScroll(id="chat")
         with Vertical(id="composer"):
             yield Static("", id="status", markup=False)
@@ -226,6 +269,10 @@ class CanvasApp(App):
         self.set_interval(0.2, self.render_status)
         self.refresh_courses()
         await self.say(HELP)
+        if self.demo:
+            await self.say("**Demo · Fictional classes, no network or model calls.**\n\n"
+                           "Try Upcoming, Grades, Browse, or ask about attendance. Replies show matching sample excerpts. "
+                           "The Canvas connection currently supports personal testing; broader use needs OAuth.")
         self.set_status(f"Ready · {self.config.provider} · {len(self.db.documents())} cached documents")
         self.query_one("#question", Input).focus()
         if self.start_setup or not self.config.courses:
@@ -233,8 +280,9 @@ class CanvasApp(App):
 
     def refresh_courses(self):
         self.query_one("#scope", Select).set_options([("All selected courses", 0)] +
-            [(d["title"], d["course"]) for d in self.db.documents(kind="course")])
+            [(Text(d["title"]), d["course"]) for d in self.db.documents(kind="course")])
         self.query_one("#scope", Select).value = 0
+        self.query_one("#snapshot", Static).update(("DEMO · " if self.demo else "") + self.db.snapshot_summary())
 
     @property
     def course(self):
@@ -242,8 +290,28 @@ class CanvasApp(App):
 
     async def say(self, text, role="system"):
         chat = self.query_one("#chat", VerticalScroll)
-        await chat.mount(Markdown(text, classes=f"message {role}"))
+        await chat.mount(Markdown(text, classes=f"message {role}", open_links=False))
         chat.scroll_end(animate=False)
+
+    @on(Markdown.LinkClicked)
+    def link_clicked(self, event):
+        event.stop()
+        self.open_source(event.href)
+
+    def open_source(self, href):
+        # Never hand model-generated URLs to the OS. Only known Canvas sources can open.
+        for row in self.db.conn.execute("SELECT DISTINCT url FROM documents"):
+            url = row[0]
+            try:
+                parsed = urlsplit(url)
+            except ValueError:
+                continue
+            if (unquote(url) == unquote(href) and parsed.scheme == "https" and not parsed.username
+                    and parsed.netloc == urlsplit(self.config.url).netloc
+                    and not parsed.query and not parsed.fragment and not self.demo):
+                self.open_url(url)
+                return
+        self.notify("Only cached Canvas source links can open. Use Browse to inspect sources.", severity="warning")
 
     def set_status(self, text):
         self.status_text = text
@@ -264,25 +332,28 @@ class CanvasApp(App):
         self.busy = True
         self.started_at = monotonic()
         self.query_one("#cancel-work", Button).disabled = False
-        for selector in ("#scope", "#setup", "#sync", "#browse"):
+        for selector in ("#scope", "#setup", "#sync", "#browse", "#upcoming", "#grades", "#coverage"):
             self.query_one(selector).disabled = True
         self.set_status(message)
 
     def finish_work(self, message):
         self.busy = False
         self.query_one("#cancel-work", Button).disabled = True
-        for selector in ("#scope", "#setup", "#sync", "#browse"):
+        for selector in ("#scope", "#setup", "#sync", "#browse", "#upcoming", "#grades", "#coverage"):
             self.query_one(selector).disabled = False
         self.set_status(message)
         self.query_one("#question", Input).focus()
 
 
     def show_setup(self):
+        if self.demo:
+            self.notify("Demo uses fictional courses. Canvas setup is currently for personal testing.")
+            return
         if not self.busy:
             self.push_screen(Setup(), lambda saved: self.run_sync() if saved else self.query_one("#question", Input).focus())
 
     @on(Button.Pressed)
-    def button(self, event):
+    async def button(self, event):
         if event.button.id == "setup":
             self.show_setup()
         elif event.button.id == "sync":
@@ -291,6 +362,8 @@ class CanvasApp(App):
             self.action_browse()
         elif event.button.id == "cancel-work":
             self.action_cancel()
+        elif event.button.id in {"upcoming", "grades", "coverage"}:
+            await self.command("/status" if event.button.id == "coverage" else "/" + event.button.id)
 
     def action_browse(self):
         if not self.busy:
@@ -307,6 +380,9 @@ class CanvasApp(App):
 
     @work(group="operation", exclusive=True)
     async def run_sync(self):
+        if self.demo:
+            self.notify("Demo data is fictional and never syncs with Canvas.")
+            return
         self.begin_work("Connecting to Canvas…")
         outcome = "Ready · Sync complete"
         try:
@@ -316,12 +392,14 @@ class CanvasApp(App):
                 return
             await sync(self.config, self.db, self.set_status)
             self.refresh_courses()
+            await self.say(self.db.snapshot_summary())
+            outcome = "Ready · Sync finished; see coverage above"
         except asyncio.CancelledError:
             outcome = "Cancelled · Completed sync sections remain cached"
             raise
         except Exception as e:
             outcome = "Sync failed · See message above; you can try again"
-            await self.say(f"Sync failed: {e}")
+            await self.say(f"Sync failed: {self.config.error(e)}")
         finally:
             self.finish_work(outcome)
 
@@ -362,9 +440,15 @@ class CanvasApp(App):
         elif cmd == "/search" and arg:
             self.search(arg)
         elif cmd == "/provider":
+            if self.demo:
+                await self.say("Demo never calls a model. Quit and run canvas-buddy to configure your provider.")
+                return
             parts = arg.split(maxsplit=1)
             if not parts or parts[0] not in {"codex", "opencode", "ollama"}:
                 await self.say("Usage: /provider codex|opencode|ollama [model]")
+                return
+            if parts[0] == "ollama" and len(parts) == 1:
+                await self.say("Ollama needs a model name: /provider ollama MODEL. Run ollama list to see installed models.")
                 return
             self.config.provider = parts[0]
             self.config.model = parts[1] if len(parts) > 1 else ""
@@ -386,7 +470,7 @@ class CanvasApp(App):
             raise
         except Exception as e:
             outcome = "Search failed · You can try again"
-            await self.say(f"Could not search: {e}")
+            await self.say(f"Could not search: {self.config.error(e)}")
         finally:
             self.finish_work(outcome)
 
@@ -396,9 +480,16 @@ class CanvasApp(App):
         outcome = "Ready · Reply below or choose a class above"
         try:
             await self.say("**You:** " + question, role="user")
-            result, sources = await answer(self.config, self.db, question, self.course, self.history,
-                                           progress=self.set_status)
-            await self.say("**Canvas Buddy:**\n\n" + result, role="assistant")
+            if self.demo:
+                hits = await self.db.search(question, self.config, self.course, limit=3)
+                result = "**Sample search results · no AI model called**\n\n" + (
+                    "\n\n".join(f"**{h['title']}**\n\n{h['text']}" for h in hits)
+                    or "No matches. Try attendance, exam, or office hours.")
+            else:
+                result, _ = await answer(self.config, self.db, question, self.course, self.history,
+                                         progress=self.set_status)
+            label = "Canvas Buddy · sample data" if self.demo else "Canvas Buddy · AI answer"
+            await self.say(f"**{label}:**\n\n" + result, role="assistant")
             self.history.append((question, result))
             self.history = self.history[-3:]
         except asyncio.CancelledError:
@@ -409,6 +500,6 @@ class CanvasApp(App):
             await self.say("The model did not reply within 4 minutes. Try again or change /provider.")
         except Exception as e:
             outcome = "Could not answer · Try again or change /provider"
-            await self.say(f"Could not answer: {e or type(e).__name__}")
+            await self.say(f"Could not answer: {self.config.error(e)}")
         finally:
             self.finish_work(outcome)
