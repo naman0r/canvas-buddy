@@ -4,7 +4,21 @@ Ask questions about your Canvas classes from a small terminal app. Answers link 
 
 MIT licensed. Local storage. Read-only Canvas access. Uses your existing Codex/OpenCode CLI login, or a local Ollama chat model.
 
-## Install on macOS
+**Current status:** the source branch is a personal-testing preview (0.3.0.dev0); Homebrew remains at 0.2.0. Broader account onboarding requires OAuth. See the [review](docs/REVIEW.md) and [Canvas authentication requirements](https://developerdocs.instructure.com/services/canvas/oauth2/file.oauth#manual-token-generation).
+
+## Try the source preview without credentials
+
+With Python 3.11+ and uv installed:
+
+```sh
+git clone https://github.com/naman0r/canvas-buddy.git
+cd canvas-buddy
+uv run canvas-buddy demo
+```
+
+The demo uses disposable fictional classes, never reads saved credentials, and makes no network or model calls. Replies show matching sample excerpts. Try **Upcoming**, **Grades**, and **Browse**; the browser has a filter and closes with Escape. In the regular app, a persistent timestamp/coverage summary shows how current and complete the cache is.
+
+## Install the released app on macOS
 
 With [Homebrew](https://brew.sh) installed:
 
@@ -25,7 +39,7 @@ For model answers, install and sign into one supported CLI before asking a quest
 
 Without a model CLI, you can still sync, browse, search, and inspect grades/deadlines. `canvas-buddy doctor` reports what is available and what needs setup.
 
-## First run
+## Personal testing setup
 
 1. Enter your school's **Canvas HTTPS URL**.
 2. Paste your **Canvas access token**. In Canvas: **Account → Settings → New Access Token**. Some schools disable personal tokens; those accounts cannot use this app without their institution enabling API access.
@@ -108,7 +122,7 @@ Canvas requests are **GET only**. The app cannot submit work, post, change grade
 
 New installations store data under `~/.local/share/canvas-buddy` (`$XDG_DATA_HOME/canvas-buddy` on systems that set it). Existing `canvas-rag` installations retain their old directory. Set `CANVAS_BUDDY_HOME` to use another directory or Canvas account; the cache is bound to the original account to prevent mixing data. Back up this private directory with your normal encrypted backups.
 
-**Local storage does not mean local inference with Codex/OpenCode.** Those providers receive your question, selected excerpts, relevant grade/date context and short conversation history under your existing account. Their own retention rules apply. Use Ollama chat for local inference too. The TUI keeps conversation history only in memory; external CLIs may keep their own logs.
+**Local storage does not mean local inference with Codex/OpenCode.** Those providers receive your question, selected excerpts, relevant grade/date context and short conversation history under your existing account. Their own retention rules apply. Use Ollama chat for local inference too. In the source preview, Ollama endpoints must be loopback addresses and proxy environment variables are ignored for those requests. The TUI keeps conversation history only in memory; external CLIs may keep their own logs.
 
 API pagination must stay on your Canvas origin. File downloads do not forward the PAT. Codex runs ephemerally with user configuration, host skill discovery and action tools disabled; OpenCode uses a tool-denied agent with sharing disabled. These restrictions reduce exposure; they are not a substitute for your provider's privacy/security policies.
 
@@ -148,3 +162,5 @@ uv build
 Five runtime dependencies: Textual, HTTPX, Beautiful Soup, python-dotenv and pypdf. SQLite/FTS5, float-vector storage and similarity scoring use Python's standard library. Unchanged files and embeddings are reused; resource snapshots update atomically. Failed endpoints retain previous timestamps and cached data. Concurrent syncs are blocked.
 
 Inspired by [canvas-mcp](https://github.com/vishalsachdev/canvas-mcp), implemented independently against the [Canvas REST API](https://developerdocs.instructure.com/services/canvas). See [RELEASING.md](RELEASING.md) for the release/tap workflow.
+
+See [SECURITY.md](SECURITY.md) for security boundaries and reporting, and [the sharing plan](docs/SHARING.md) for researched communities and pitch drafts.
