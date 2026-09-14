@@ -265,7 +265,7 @@ async def test_cli_accepts_options_between_command_and_question(config, monkeypa
 
 async def test_chat_progress_roles_and_ready_state(config, db, monkeypatch):
     from canvas_rag import ui
-    from textual.widgets import Button, Input, Markdown, Static
+    from textual.widgets import Button, Input, Static
     release = asyncio.Event()
     async def slow_answer(*args, progress, **kwargs):
         progress("Waiting for Codex to answer…")
@@ -290,9 +290,10 @@ async def test_chat_progress_roles_and_ready_state(config, db, monkeypatch):
         assert not app.busy and "Ready" in str(status.render())
         assert app.query_one("#cancel-work", Button).disabled
         assert app.focused is app.query_one("#question", Input)
-        human = app.query_one("Markdown.user", Markdown)
-        model = app.query_one("Markdown.assistant", Markdown)
-        assert human.styles.border_left[1] != model.styles.border_left[1]
+        human = app.query_one(".message.user > .message-bar", Static)
+        model = app.query_one(".message.assistant > .message-bar", Static)
+        assert human.styles.background != model.styles.background
+        assert model.size.height == model.parent.size.height
         for width, height in [(65, 18), (120, 38)]:
             await pilot.resize_terminal(width, height)
             await pilot.pause()

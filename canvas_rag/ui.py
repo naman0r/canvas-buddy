@@ -8,6 +8,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.filter import Monochrome, NoColor
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Markdown, Select, SelectionList, Static
 
@@ -218,10 +219,11 @@ class CanvasApp(App):
     #snapshot { height: auto; max-height: 3; padding: 0 2; color: $text-muted; }
     #scope { width: 1fr; }
     #chat { height: 1fr; min-height: 0; padding: 0 2; }
-    .message { margin: 1 0; padding: 0 1; border-left: thick $accent; height: auto; }
-    .message.user { border-left: thick #f5c451; }
-    .message.assistant { border-left: thick #5ccfe6; }
-    .message.system { border-left: thick #7f8490; }
+    .message { margin: 1 0; height: auto; }
+    .message > .message-bar { dock: left; width: 1; height: 100%; background: #7f8490; }
+    .message.user > .message-bar { background: #f5c451; }
+    .message.assistant > .message-bar { background: #5ccfe6; }
+    .message > Markdown { width: 1fr; height: auto; padding: 0 1; }
     #composer { dock: bottom; height: 6; padding: 0 1; }
     #status { height: 2; padding: 0 1; color: $text-muted; }
     #status.working { color: #5ccfe6; }
@@ -235,6 +237,11 @@ class CanvasApp(App):
 
     def __init__(self, config, db, setup=False, demo=False):
         super().__init__()
+        # Role colors must survive launchers that export NO_COLOR.
+        self.no_color = False
+        for line_filter in self.get_line_filters():
+            if isinstance(line_filter, (Monochrome, NoColor)):
+                line_filter.enabled = False
         self.config, self.db = config, db
         self.start_setup = setup
         self.demo = demo
@@ -290,7 +297,9 @@ class CanvasApp(App):
 
     async def say(self, text, role="system"):
         chat = self.query_one("#chat", VerticalScroll)
-        await chat.mount(Markdown(text, classes=f"message {role}", open_links=False))
+        await chat.mount(Horizontal(Static(classes="message-bar"),
+                                    Markdown(text, classes=role, open_links=False),
+                                    classes=f"message {role}"))
         chat.scroll_end(animate=False)
 
     @on(Markdown.LinkClicked)
@@ -462,9 +471,11 @@ class CanvasApp(App):
         self.begin_work("Searching your courses…")
         outcome = "Ready · Search complete"
         try:
+            await self.say("**You:** /search " + text, role="user")
             rows = await self.db.search(text, self.config, self.course)
-            await self.say("\n\n".join(f"[{r['title']}]({r['url']})\n\n{r['text']}" for r in rows)
-                           or "No matching cached sources.")
+            await self.say("**Local search results · cached excerpts, not an AI answer**\n\n" + (
+                "\n\n".join(f"[{r['title']}]({r['url']})\n\n{r['text']}" for r in rows)
+                or "No matching cached sources."), role="assistant")
         except asyncio.CancelledError:
             outcome = "Cancelled · Ready for your next question"
             raise
