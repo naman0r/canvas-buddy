@@ -10,7 +10,7 @@ import httpx
 from .answer import answer
 from .canvas import Canvas, sync
 from .config import Config
-from .store import Store
+from .store import STALE_HOURS, Store
 from .diagnostics import doctor, self_test
 
 
@@ -19,13 +19,17 @@ def main():
     parser = argparse.ArgumentParser(description="Local Canvas study companion")
     parser.add_argument("--version", action="version", version=f"Canvas Buddy {version('canvas-buddy')}")
     parser.add_argument("command", nargs="?", default="tui", choices=[
-        "tui", "demo", "courses", "setup", "sync", "ask", "search", "status", "upcoming", "grades", "doctor", "self-test"])
+        "tui", "demo", "courses", "setup", "sync", "ask", "search", "status", "upcoming", "grades", "digest",
+        "changes", "doctor", "self-test"])
     parser.add_argument("question", nargs="*")
     parser.add_argument("--url", help="Canvas HTTPS site URL")
     parser.add_argument("--courses", help="Comma-separated course IDs to cache")
     parser.add_argument("--course", type=int, help="Filter to one course")
     parser.add_argument("--provider", choices=["codex", "opencode", "ollama"])
     parser.add_argument("--model")
+    parser.add_argument("--if-stale", action="store_true",
+                        help=f"With sync: skip when the cache is under {STALE_HOURS} hours old")
+    parser.add_argument("--days", type=int, default=14, help="With digest: upcoming window")
     args = parser.parse_intermixed_args()
     if args.command == "self-test":
         asyncio.run(self_test())
@@ -76,6 +80,9 @@ def main():
         elif args.command == "sync":
             if not config.courses:
                 raise ValueError("Choose classes with setup first")
+            if args.if_stale and db.documents() and not db.stale(STALE_HOURS):
+                print(f"Cache is under {STALE_HOURS} hours old; skipping sync.")
+                return
             await sync(config, db, print)
         elif args.command in {"ask", "search"}:
             q = " ".join(args.question)
@@ -93,6 +100,10 @@ def main():
                 print(f"{r['due']}\t{r['title']}\t{r['state']}\n{r['url']}")
         elif args.command == "grades":
             print(db.grades(args.course))
+        elif args.command == "digest":
+            print(db.dashboard(args.course, days=args.days))
+        elif args.command == "changes":
+            print(db.changes_markdown(args.course))
         elif args.command == "doctor":
             await doctor(config, db)
 

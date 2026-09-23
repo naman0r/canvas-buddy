@@ -186,111 +186,20 @@ async def _sync(config, db, progress):
                 db.coverage(cid, kind, "error", str(e).replace(config.token, "[redacted]"))
                 progress(f"{cid} · {kind}: unavailable (see /status)")
 
-        for cid in config.courses:
-            prefix = f"courses/{cid}"
-            async def course():
-                c = await api.one(prefix, {"include[]": ["syllabus_body", "total_scores", "term"]})
-                return [record(cid, "course", c, api.base)]
-            await collect(cid, "course", course)
-            for kind, endpoint, params in [
-                ("assignment", "assignments", {"include[]": ["submission"]}),
-                ("grade", "enrollments", {"user_id": me["id"], "type[]": "StudentEnrollment"}),
-                ("weight", "assignment_groups", {}),
-                ("announcement", "discussion_topics", {"only_announcements": "true"}),
-                ("quiz", "quizzes", {}),
-                ("teacher", "users", {"enrollment_type[]": ["teacher", "ta"]}),
-            ]:
-                async def fetch(endpoint=endpoint, params=params, kind=kind):
-                    items = await api.all(f"{prefix}/{endpoint}", params)
-                    return [record(cid, kind, i, api.base) for i in items]
-                await collect(cid, kind, fetch)
-
-            async def submissions():
-                items = await api.all(f"{prefix}/students/submissions", {
-                    "student_ids[]": [me["id"]], "include[]": ["submission_comments", "rubric_assessment"]})
-                return [record(cid, "submission", {**i, "id": i["assignment_id"],
-                        "title": f"Submission / feedback for assignment {i['assignment_id']}"}, api.base) for i in items]
-            await collect(cid, "submission", submissions)
-
-            async def modules():
-                out = []
-                for m in await api.all(f"{prefix}/modules"):
-                    m["items"] = await api.all(f"{prefix}/modules/{m['id']}/items")
-                    out.append(record(cid, "module", m, api.base))
-                return out
-            await collect(cid, "module", modules)
-
-            async def discussions():
-                out = []
-                for d in await api.all(f"{prefix}/discussion_topics"):
-                    d["thread"] = await api.one(f"{prefix}/discussion_topics/{d['id']}/view")
-                    out.append(record(cid, "discussion", d, api.base))
-                return out
-            await collect(cid, "discussion", discussions)
-
-            async def linked_items(kind, endpoint):
-                warnings = []
-                try:
-                    items = await api.all(f"{prefix}/{endpoint}")
-                except RuntimeError as e:
-                    if not any(f"HTTP {code}" in str(e) for code in (403, 404)):
-                        raise
-                    items = []
-                    warnings.append(f"Listing unavailable; module/content links only ({e})")
-                refs = {str(i.get("url") if kind == "page" else i["id"]): i for i in items}
-                for m in db.documents(cid, "module"):
-                    for i in m["raw"].get("items", []):
-                        key = i.get("page_url") if kind == "page" else i.get("content_id")
-                        if i.get("type", "").lower() == kind and key:
-                            refs.setdefault(str(key), {"title": i.get("title"), "id": key})
-                # HTML can link files absent from the Files tab, including the syllabus.
-                pattern = rf"/courses/{cid}/pages/([^\s\"<>?#]+)" if kind == "page" else r"/files/(\d+)"
-                for d in db.documents(cid):
-                    for key in re.findall(pattern, json.dumps(d["raw"])):
-                        key = unquote(key).rstrip("\\")
-                        refs.setdefault(key, {"id": key, "title": f"{kind} {key}"})
-                out = []
-                if kind == "page":
-                    try:
-                        front = await api.one(f"{prefix}/front_page")
-                        refs.setdefault(front["url"], front)
-                    except RuntimeError:
-                        pass
-                for key, item in refs.items():
-                    path = f"{prefix}/pages/{quote(key, safe='')}" if kind == "page" else f"files/{key}"
-                    try:
-                        item = await api.one(path)
-                        if kind == "page":
-                            out.append(record(cid, kind, item, api.base))
-                            continue
-                        old = db.get(f"{cid}:file:{key}")
-                        unchanged = old and all(old["raw"].get(k) == item.get(k)
-                                                for k in ("updated_at", "size", "locked_for_user"))
-                        if unchanged and "[Extraction failed:" not in old["body"]:
-                            body = old["body"]
-                        else:
-                            body = readable({k: item.get(k) for k in ("display_name", "content-type", "size")})
-                            try:
-                                body += "\n\n" + await api.file_text(item)
-                            except Exception:
-                                body += "\n[Extraction failed: open the Canvas link.]"
-                        out.append(record(cid, kind, item, api.base, body))
-                    except RuntimeError as e:
-                        warnings.append(str(e))
-                        out.append(record(cid, kind, {**item, "id": key}, api.base,
-                                          f"[Content unavailable: {e}]"))
-                return out, warnings
-
-            await collect(cid, "page", lambda: linked_items("page", "pages"))
-            await collect(cid, "file", lambda: linked_items("file", "files"))
-
-            async def calendar():
-                now = datetime.now(timezone.utc)
-                items = await api.all("calendar_events", {"context_codes[]": [f"course_{cid}"],
-                    "start_date": (now - timedelta(days=180)).date().isoformat(),
-                    "end_date": (now + timedelta(days=365)).date().isoformat()})
-                return [record(cid, "event", i, api.base) for i in items]
-            await collect(cid, "event", calendar)
+        # Courses sync in parallel; within a course the order matters because pages/files
+        # discover content through the modules cached just before them.
+        limit = asyncio.Semaphore(SYNC_CONCURRENCY)
+        async def sync_course(cid):
+            async with limit:
+                await _sync_course(api, db, me, cid, collect)
+        # TaskGroup cancels the siblings when one course raises; a plain gather would leave them
+        # running against the closed client and record bogus coverage errors.
+        try:
+            async with asyncio.TaskGroup() as group:
+                for cid in config.courses:
+                    group.create_task(sync_course(cid))
+        except ExceptionGroup as group_error:
+            raise group_error.exceptions[0] from None
 
         async def inbox():
             out = []
@@ -303,4 +212,123 @@ async def _sync(config, db, progress):
         await collect(0, "inbox", inbox)
     progress("Indexing new and changed text…")
     await db.embed(config, progress)
+    db.prune_changes()
+    db.mark_synced()
     progress("Sync complete. /status shows coverage and any unavailable content.")
+
+
+SYNC_CONCURRENCY = 3  # Canvas throttles per token; three courses at once stays well under it.
+
+
+async def _sync_course(api, db, me, cid, collect):
+    prefix = f"courses/{cid}"
+    async def course():
+        c = await api.one(prefix, {"include[]": ["syllabus_body", "total_scores", "term"]})
+        return [record(cid, "course", c, api.base)]
+    await collect(cid, "course", course)
+    for kind, endpoint, params in [
+        ("assignment", "assignments", {"include[]": ["submission"]}),
+        ("grade", "enrollments", {"user_id": me["id"], "type[]": "StudentEnrollment"}),
+        ("weight", "assignment_groups", {}),
+        ("announcement", "discussion_topics", {"only_announcements": "true"}),
+        ("quiz", "quizzes", {}),
+        ("teacher", "users", {"enrollment_type[]": ["teacher", "ta"]}),
+    ]:
+        async def fetch(endpoint=endpoint, params=params, kind=kind):
+            items = await api.all(f"{prefix}/{endpoint}", params)
+            return [record(cid, kind, i, api.base) for i in items]
+        await collect(cid, kind, fetch)
+
+    async def submissions():
+        items = await api.all(f"{prefix}/students/submissions", {
+            "student_ids[]": [me["id"]], "include[]": ["submission_comments", "rubric_assessment"]})
+        return [record(cid, "submission", {**i, "id": i["assignment_id"],
+                "title": f"Submission / feedback for assignment {i['assignment_id']}"}, api.base) for i in items]
+    await collect(cid, "submission", submissions)
+
+    async def modules():
+        out = []
+        for m in await api.all(f"{prefix}/modules"):
+            m["items"] = await api.all(f"{prefix}/modules/{m['id']}/items")
+            out.append(record(cid, "module", m, api.base))
+        return out
+    await collect(cid, "module", modules)
+
+    async def discussions():
+        out = []
+        for d in await api.all(f"{prefix}/discussion_topics"):
+            d["thread"] = await api.one(f"{prefix}/discussion_topics/{d['id']}/view")
+            out.append(record(cid, "discussion", d, api.base))
+        return out
+    await collect(cid, "discussion", discussions)
+
+    async def linked_items(kind, endpoint):
+        warnings = []
+        try:
+            items = await api.all(f"{prefix}/{endpoint}")
+        except RuntimeError as e:
+            if not any(f"HTTP {code}" in str(e) for code in (403, 404)):
+                raise
+            items = []
+            warnings.append(f"Listing unavailable; module/content links only ({e})")
+        refs = {str(i.get("url") if kind == "page" else i["id"]): i for i in items}
+        for m in db.documents(cid, "module"):
+            for i in m["raw"].get("items", []):
+                key = i.get("page_url") if kind == "page" else i.get("content_id")
+                if i.get("type", "").lower() == kind and key:
+                    refs.setdefault(str(key), {"title": i.get("title"), "id": key})
+        # HTML can link files absent from the Files tab, including the syllabus.
+        pattern = rf"/courses/{cid}/pages/([^\s\"<>?#]+)" if kind == "page" else r"/files/(\d+)"
+        for d in db.documents(cid):
+            for key in re.findall(pattern, json.dumps(d["raw"])):
+                key = unquote(key).rstrip("\\")
+                refs.setdefault(key, {"id": key, "title": f"{kind} {key}"})
+        out = []
+        if kind == "page":
+            try:
+                front = await api.one(f"{prefix}/front_page")
+                refs.setdefault(front["url"], front)
+            except RuntimeError:
+                pass
+        for key, item in refs.items():
+            path = f"{prefix}/pages/{quote(key, safe='')}" if kind == "page" else f"files/{key}"
+            try:
+                item = await api.one(path)
+                if kind == "page":
+                    out.append(record(cid, kind, item, api.base))
+                    continue
+                old = db.get(f"{cid}:file:{key}")
+                unchanged = old and all(old["raw"].get(k) == item.get(k)
+                                        for k in ("updated_at", "size", "locked_for_user"))
+                if unchanged and "[Extraction failed:" not in old["body"]:
+                    body = old["body"]
+                else:
+                    body = readable({k: item.get(k) for k in ("display_name", "content-type", "size")})
+                    try:
+                        body += "\n\n" + await api.file_text(item)
+                    except Exception:
+                        body += "\n[Extraction failed: open the Canvas link.]"
+                out.append(record(cid, kind, item, api.base, body))
+            except RuntimeError as e:
+                warnings.append(str(e))
+                out.append(record(cid, kind, {**item, "id": key}, api.base,
+                                  f"[Content unavailable: {e}]"))
+        return out, warnings
+
+    await collect(cid, "page", lambda: linked_items("page", "pages"))
+    await collect(cid, "file", lambda: linked_items("file", "files"))
+
+    async def calendar():
+        now = datetime.now(timezone.utc)
+        items = await api.all("calendar_events", {"context_codes[]": [f"course_{cid}"],
+            "start_date": (now - timedelta(days=180)).date().isoformat(),
+            "end_date": (now + timedelta(days=365)).date().isoformat()})
+        return [record(cid, "event", i, api.base) for i in items]
+    await collect(cid, "event", calendar)
+
+    async def todo():
+        items = await api.all(f"{prefix}/todo")
+        return [record(cid, "todo", {**i, "id": (i.get("assignment") or i.get("quiz") or {}).get("id") or i.get("html_url"),
+                                     "title": (i.get("assignment") or i.get("quiz") or {}).get("name") or "To-do item"},
+                       api.base) for i in items]
+    await collect(cid, "todo", todo)

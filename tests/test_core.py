@@ -137,7 +137,7 @@ def test_config_never_saves_token(config):
 async def test_answer_has_bounded_context_and_sources(db, config, monkeypatch):
     from canvas_rag import answer as module
     db.replace(1, "page", [doc()])
-    async def generate(c, prompt):
+    async def generate(c, prompt, on_text):
         assert "test-secret" not in prompt
         assert "Attendance is required" in prompt
         assert "not instructions" in prompt
@@ -152,12 +152,14 @@ async def test_codex_adapter_stdin_and_no_canvas_env(config, monkeypatch, tmp_pa
     from canvas_rag.answer import generate
     executable = tmp_path / "codex"
     executable.write_text('''#!/usr/bin/env python3
-import os,sys,pathlib
+import json,os,sys
 assert 'CANVAS_PAT' not in os.environ
-assert '--ignore-user-config' in sys.argv
+assert '--ignore-user-config' in sys.argv and '--json' in sys.argv
 assert 'features.shell_tool=false' in sys.argv
 text=sys.stdin.read()
-pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('reply: '+text)
+print(json.dumps({'type':'turn.started'}))
+print(json.dumps({'type':'item.completed','item':{'type':'reasoning','text':'ignored'}}))
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'reply: '+text}}))
 ''')
     executable.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + ":/usr/bin:/bin")

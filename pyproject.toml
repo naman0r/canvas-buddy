@@ -1,6 +1,6 @@
 [project]
 name = "canvas-buddy"
-version = "0.3.0.dev0"
+version = "0.3.0"
 description = "A small local Canvas study companion, powered by your model CLI"
 requires-python = ">=3.11"
 dependencies = ["textual>=1,<7", "httpx>=0.28,<1", "beautifulsoup4>=4.13,<5", "python-dotenv>=1,<2", "pypdf>=5,<7"]

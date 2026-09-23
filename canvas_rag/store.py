@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+STALE_HOURS = 6  # Auto-sync threshold shared by the TUI and `sync --if-stale`.
+
 
 class Store:
     def __init__(self, home):
@@ -33,6 +35,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS coverage(
                 course INTEGER, kind TEXT, state TEXT, detail TEXT, attempted TEXT,
                 PRIMARY KEY(course,kind));
+            CREATE TABLE IF NOT EXISTS changes(
+                course INTEGER, kind TEXT, change TEXT, title TEXT, detail TEXT, at TEXT);
         """)
 
     def close(self):
@@ -55,31 +59,126 @@ class Store:
                 if row[0] not in allowed:
                     self.conn.execute("DELETE FROM documents WHERE course=?", (row[0],))
                     self.conn.execute("DELETE FROM coverage WHERE course=?", (row[0],))
+                    self.conn.execute("DELETE FROM changes WHERE course=?", (row[0],))
             # Remove only deselected conversations; retain selected ones if inbox sync fails.
             for row in self.conn.execute("SELECT id,raw FROM documents WHERE kind='inbox'").fetchall():
                 if json.loads(row["raw"]).get("context_code") not in {f"course_{i}" for i in courses}:
                     self.conn.execute("DELETE FROM documents WHERE id=?", (row["id"],))
 
+    # The change log is a rolling window (see CHANGE_DAYS) rather than "since the previous sync":
+    # syncing twice in a morning must not hide an announcement, and a failed sync must not erase it.
+    CHANGE_DAYS = 7
+
+    def change(self, course, kind, change, title, detail=""):
+        with self.conn:
+            self.conn.execute("INSERT INTO changes VALUES(?,?,?,?,?,?)",
+                              (course, kind, change, title, detail, datetime.now(timezone.utc).isoformat()))
+
+    def prune_changes(self):
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.CHANGE_DAYS)).isoformat()
+        with self.conn:
+            self.conn.execute("DELETE FROM changes WHERE at < ?", (cutoff,))
+
+    def changes(self, course=None):
+        return self.conn.execute(
+            "SELECT * FROM changes WHERE (? IS NULL OR course=?) ORDER BY rowid DESC LIMIT 60",
+            (course, course)).fetchall()
+
+    def mark_synced(self):
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO meta VALUES('last_sync',?)",
+                              (datetime.now(timezone.utc).isoformat(),))
+
+    def stale(self, hours=STALE_HOURS):
+        row = self.conn.execute("SELECT value FROM meta WHERE key='last_sync'").fetchone()
+        # Caches from before last_sync existed fall back to the newest document timestamp.
+        last = row[0] if row else self.conn.execute("SELECT max(synced) FROM documents").fetchone()[0]
+        if not last:
+            return False
+        return datetime.fromisoformat(last) < datetime.now(timezone.utc) - timedelta(hours=hours)
+
     def replace(self, course, kind, records):
         now = datetime.now(timezone.utc).isoformat()
         with self.conn:
+            # Only a course/kind that was synced before can have "new" or "removed" entries;
+            # otherwise the first sync would log every cached document.
+            prior = self.conn.execute("SELECT 1 FROM coverage WHERE course=? AND kind=? AND state!='error'",
+                                      (course, kind)).fetchone()
+            label = self._course_name(course) if kind == "grade" else None
             ids = {r["id"] for r in records}
-            for row in self.conn.execute("SELECT id FROM documents WHERE course=? AND kind=?", (course, kind)).fetchall():
+            for row in self.conn.execute("SELECT id,title FROM documents WHERE course=? AND kind=?", (course, kind)).fetchall():
                 if row[0] not in ids:
+                    if prior:
+                        self.conn.execute("INSERT INTO changes VALUES(?,?,?,?,?,?)",
+                                          (course, kind, "removed", label or row["title"], "", now))
                     self.conn.execute("DELETE FROM documents WHERE id=?", (row[0],))
             for r in records:
                 digest = hashlib.sha256((r["title"] + "\n" + r["body"]).encode()).hexdigest()
-                old = self.conn.execute("SELECT hash FROM documents WHERE id=?", (r["id"],)).fetchone()
+                old = self.conn.execute("SELECT * FROM documents WHERE id=?", (r["id"],)).fetchone()
                 self.conn.execute("""INSERT INTO documents VALUES(?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET title=excluded.title,url=excluded.url,
                     body=excluded.body,raw=excluded.raw,hash=excluded.hash,synced=excluded.synced""",
                     (r["id"], course, kind, r["title"], r["url"], r["body"], json.dumps(r["raw"]), digest, now))
-                if not old or old[0] != digest:
+                if not old and prior:
+                    self.conn.execute("INSERT INTO changes VALUES(?,?,?,?,?,?)",
+                                      (course, kind, "new", label or r["title"], "", now))
+                elif old and old["hash"] != digest:
+                    before, after = json.loads(old["raw"]), r.get("raw") or {}
+                    detail = self._change_detail(kind, before, after, old["title"], r["title"])
+                    # Grades only count when a score moved; other kinds when non-activity content did.
+                    if detail or (kind != "grade" and self._signature(before) != self._signature(after)):
+                        self.conn.execute("INSERT INTO changes VALUES(?,?,?,?,?,?)",
+                                          (course, kind, "changed", label or r["title"], detail, now))
+                if not old or old["hash"] != digest:
                     self.conn.execute("DELETE FROM chunks WHERE doc=?", (r["id"],))
                     words = r["body"].split()
                     for start in range(0, max(1, len(words)), 280):
                         text = r["title"] + "\n" + " ".join(words[start:start + 340])
                         self.conn.execute("INSERT INTO chunks(doc,text) VALUES(?,?)", (r["id"], text))
+
+    # Fields Canvas rewrites whenever the student merely views something.
+    VOLATILE = {"last_activity_at", "total_activity_time", "last_attended_at", "completed_at", "state",
+                "read_state", "unread_count", "completion_requirement", "todo_date", "updated_at"}
+
+    @classmethod
+    def _signature(cls, value):
+        if isinstance(value, dict):
+            return {k: cls._signature(v) for k, v in value.items() if k not in cls.VOLATILE}
+        if isinstance(value, list):
+            return [cls._signature(v) for v in value]
+        return value
+
+    @staticmethod
+    def when(value):
+        """Local short timestamp for any Canvas ISO string, or None when absent or malformed."""
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%b %d, %H:%M")
+        except ValueError:
+            return None
+
+    def _course_name(self, course):
+        row = self.conn.execute("SELECT title FROM documents WHERE course=? AND kind='course'", (course,)).fetchone()
+        return row[0] if row else f"course {course}"
+
+    @classmethod
+    def _change_detail(cls, kind, old, new, old_title, new_title):
+        parts = []
+        if kind == "grade":
+            before = (old.get("grades") or {}).get("current_score")
+            after = (new.get("grades") or {}).get("current_score")
+            if before != after:
+                parts.append(f"current score {before if before is None else round(before, 2)} → "
+                             f"{after if after is None else round(after, 2)}")
+        else:
+            before = cls.when(old.get("due_at") if "due_at" in old else old.get("start_at"))
+            after = cls.when(new.get("due_at") if "due_at" in new else new.get("start_at"))
+            if before != after and after:
+                parts.append(f"deadline moved from {before} to {after}" if before else f"deadline set for {after}")
+        if old_title != new_title:
+            parts.append(f"retitled from {old_title!r}")
+        return "; ".join(parts)
 
     def coverage(self, course, kind, state, detail):
         with self.conn:
@@ -177,6 +276,8 @@ class Store:
                 rows = self.conn.execute("""SELECT c.id,c.text,c.vector,d.* FROM chunks c
                     JOIN documents d ON d.id=c.doc WHERE c.model=? AND c.vector IS NOT NULL
                     AND (? IS NULL OR d.course=?)""", (config.embed_model, course, course)).fetchall()
+                # Pure-Python cosine over every chunk is linear in cache size: instant for a few
+                # hundred chunks, a second or two at ten thousand. Not worth a NumPy dependency yet.
                 ranked = []
                 for row in rows:
                     v = array("f", row["vector"])
@@ -238,6 +339,30 @@ class Store:
                          f"Synced {d['synced']}\n{d['url']}")
         return "\n\n".join(lines) or "No grade records cached. /status shows coverage."
 
+    def changes_markdown(self, course=None):
+        log = self.changes(course)
+        label = {"new": "New", "changed": "Changed", "removed": "Removed"}
+        return f"**Recent changes** (last {self.CHANGE_DAYS} days; {len(log)} recorded)\n" + ("\n".join(
+            f"- {self.when(c['at'])} · {label.get(c['change'], c['change'])} · {c['kind']} · {c['title'][:70]}"
+            + (f" · {c['detail']}" if c["detail"] else "") for c in log)
+            or "None recorded yet. After your next sync, this lists what Canvas posted, moved, or removed.")
+
+    def dashboard(self, course=None, days=14):
+        sections = []
+        rows = self.upcoming(course, days=days)
+        sections.append(f"**Upcoming work** (next {days} days; local timezone)\n" + ("\n".join(
+            f"- {self.when(r['due'])} · [{r['title']}]({r['url']}) · {r['state']}" for r in rows)
+            or "Nothing dated in the cache for this window. Try /upcoming for 30 days."))
+        sections.append(self.changes_markdown(course))
+        grades = []
+        names = {d["course"]: d["title"] for d in self.documents(kind="course")}
+        for g in self.documents(course, "grade"):
+            score = (g["raw"].get("grades") or {}).get("current_score", None)
+            grades.append(f"- {names.get(g['course'], g['course'])}: "
+                          + ("no grade posted" if score is None else f"{round(score, 2)}"))
+        sections.append("**Grades**\n" + ("\n".join(grades) or "No grade records cached; grade sync needs coverage. /status shows details."))
+        return "\n\n".join(sections)
+
     def facts(self, course=None):
         lines = []
         for d in self.documents(course):
@@ -253,5 +378,8 @@ class Store:
                              f"missing={s.get('missing')} late={s.get('late')} | {d['url']}")
             elif d["kind"] == "event":
                 lines.append(f"{d['course']} event {d['title']} | {r.get('start_at')} | {d['url']}")
+            elif d["kind"] == "todo":
+                lines.append(f"{d['course']} todo ({r.get('type')}) {d['title']} | "
+                             f"due={(r.get('assignment') or r.get('quiz') or {}).get('due_at')} | {d['url']}")
         text = "\n".join(lines)
         return text[:18000] + ("\n[Structured snapshot truncated; narrow the course filter.]" if len(text) > 18000 else "")

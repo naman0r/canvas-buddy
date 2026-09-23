@@ -57,8 +57,11 @@ class Config:
 
     @classmethod
     def load(cls):
-        # Keep the development checkout's .env workflow; installations use saved credentials.
-        env = {**dotenv_values(Path.cwd() / ".env"), **os.environ}
+        # A .env is honoured only inside a source checkout, so launching from an unrelated project
+        # directory cannot silently repoint the app. Installations use saved credentials.
+        cwd = Path.cwd()
+        checkout = (cwd / "pyproject.toml").exists() and (cwd / "canvas_rag" / "__init__.py").exists()
+        env = {**(dotenv_values(cwd / ".env") if checkout else {}), **os.environ}
         c = cls()
         c.home.mkdir(parents=True, exist_ok=True, mode=0o700)
         c.home.chmod(0o700)

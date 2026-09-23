@@ -1,6 +1,6 @@
 # Safety, setup, and experience review
 
-Reviewed September 12, 2026. This is a code review and test pass, not an independent security certification. The changes below are in the 0.3.0.dev0 source preview; Homebrew still installs 0.2.0.
+Reviewed September 12, 2026; priorities updated September 23 with the 0.3.0 release. This is a code review and test pass, not an independent security certification.
 
 ## Release decision
 
@@ -30,7 +30,7 @@ Persistent progress, visible partial failures, useful error recovery, and a low-
 1. **Before broad account onboarding: OAuth integration design.** Obtain institution approval and credentials; determine an approved native-client flow or token-exchange service. Never ship a shared client secret in an open-source binary. A service would change the local-only architecture and needs an explicit design decision. Implement authorization, cancellation, refresh, revocation, and account-binding tests once this is resolved.
 2. **Credential storage:** use macOS Keychain with an explicit portable fallback; current files are owner-only but not independently encrypted. Add a clear disconnect/delete-data flow that explains remote token revocation separately.
 3. **Document processing:** isolate PDF/Office extraction in a cancellable process with time/memory budgets. Current 25 MB downloads and Office expansion checks do not bound all parser CPU/memory use. Also harden download-host resolution against private-network destinations; signed redirects currently enforce HTTPS and omit the PAT, but are not a full network sandbox. [OWASP file-processing guidance](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html).
-4. **Answer quality:** build a synthetic evaluation set for ambiguous course names, contradictory announcements, missing dates, stale grades, and follow-up questions. Measure correct citations and appropriate uncertainty before adding more retrieval infrastructure. Cached metadata can verify link origin, not the truth of a model claim.
+4. **Answer quality:** a retrieval evaluation set now lives in `tests/test_retrieval.py` (fictional courses, expected source in the top three for each question). Extend it with contradictory announcements, stale grades, and follow-up questions, and add a model-side check for correct citations and appropriate uncertainty before adding more retrieval infrastructure. Cached metadata can verify link origin, not the truth of a model claim.
 5. **New-user observation:** watch three people try the demo, including one who rarely uses Terminal. Ask them to find a deadline, locate an attendance policy, distinguish sample data from live data, and recover from a failed connection. Record friction manually; add no telemetry.
 
 ## Validation

@@ -6,26 +6,34 @@ import shutil
 import signal
 import tempfile
 from datetime import datetime
-from pathlib import Path
 
 import httpx
 
 from .diagnostics import GUIDANCE
 
 
-async def generate(config, prompt):
+async def generate(config, prompt, on_text=lambda text: None):
+    """Return the full reply. on_text receives the reply so far whenever the provider yields more:
+    per token for Ollama, per completed message for Codex/OpenCode, whose CLIs emit no deltas."""
     if config.token:
         prompt = prompt.replace(config.token, "[redacted]")
     if config.provider == "ollama":
         config.validate_ollama()
         if not config.model:
             raise ValueError("Choose an installed Ollama chat model in Courses setup (run ollama list).")
+        parts = []
         async with httpx.AsyncClient(timeout=240, trust_env=False) as client:
-            r = await client.post(config.ollama + "/api/chat", json={
-                "model": config.model, "stream": False,
-                "messages": [{"role": "user", "content": prompt}], "think": False})
-            r.raise_for_status()
-            return r.json()["message"]["content"]
+            async with client.stream("POST", config.ollama + "/api/chat", json={
+                    "model": config.model, "stream": True,
+                    "messages": [{"role": "user", "content": prompt}], "think": False}) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    event = _event(line)
+                    if event.get("error"):
+                        raise RuntimeError(f"Ollama error: {event['error']}")
+                    parts.append((event.get("message") or {}).get("content", ""))
+                    on_text("".join(parts))
+        return "".join(parts)
     if config.provider not in {"codex", "opencode"}:
         raise ValueError("Choose codex, opencode, or ollama")
     binary = shutil.which(config.provider)
@@ -36,10 +44,9 @@ async def generate(config, prompt):
     with tempfile.TemporaryDirectory(prefix="canvas-rag-") as tmp:
         if config.provider == "codex":
             command = [binary, "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check",
-                       "--sandbox", "read-only", "--color", "never", "-C", tmp,
+                       "--sandbox", "read-only", "--color", "never", "-C", tmp, "--json",
                        "-c", 'web_search="disabled"', "-c", "project_doc_max_bytes=0",
-                       "-c", "features.skip_host_skill_discovery=true",
-                       "-o", str(Path(tmp) / "answer.txt")]
+                       "-c", "features.skip_host_skill_discovery=true"]
             for feature in ("shell_tool", "unified_exec", "apps", "plugins", "multi_agent", "hooks",
                             "browser_use", "computer_use", "image_generation", "view_image", "memories"):
                 command += ["-c", f"features.{feature}=false"]
@@ -53,12 +60,47 @@ async def generate(config, prompt):
                     "mode": "primary", "permission": {"*": "deny"}, "tools": {"*": False}}}})
             if config.model:
                 command += ["-m", config.model]
-        proc = await asyncio.create_subprocess_exec(*command, cwd=tmp, env=env,
+        # limit: a single agent_message JSONL line can exceed StreamReader's 64 KiB default.
+        proc = await asyncio.create_subprocess_exec(*command, cwd=tmp, env=env, limit=8 * 1024 * 1024,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             start_new_session=True)
+        parts = []
+
+        async def read_events():
+            async for raw in proc.stdout:
+                event = _event(raw.decode(errors="replace"))
+                if config.provider == "codex":
+                    item = event.get("item") or {}
+                    if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+                        parts.append(item.get("text", ""))
+                    elif event.get("type") == "error":
+                        raise RuntimeError(f"Codex error: {event.get('message', '')}"[:600])
+                    else:
+                        continue
+                elif event.get("type") == "error":
+                    raise RuntimeError("OpenCode returned an error; check opencode auth and model selection")
+                elif event.get("type") == "text":
+                    parts.append(event.get("part", {}).get("text", ""))
+                else:
+                    continue
+                on_text("\n".join(parts))
+
+        async def feed():
+            # A CLI that exits before reading (not logged in) breaks the pipe; the exit-code
+            # path below reports its stderr, which is the useful message.
+            try:
+                proc.stdin.write(prompt.encode())
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                proc.stdin.close()
+
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(prompt.encode()), timeout=240)
-        except (asyncio.CancelledError, TimeoutError):
+            _, _, stderr = await asyncio.wait_for(
+                asyncio.gather(feed(), read_events(), proc.stderr.read()), timeout=240)
+            await proc.wait()
+        except BaseException:
             if proc.returncode is None:
                 os.killpg(proc.pid, signal.SIGTERM)
                 try:
@@ -72,27 +114,22 @@ async def generate(config, prompt):
             if config.token:
                 detail = detail.replace(config.token, "[redacted]")
             raise RuntimeError(f"{config.provider} failed. Check its login/model configuration.\n{detail}")
-        if config.provider == "codex":
-            path = Path(tmp) / "answer.txt"
-            result = path.read_text() if path.exists() else ""
-        else:
-            parts = []
-            for line in stdout.decode(errors="replace").splitlines():
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                if event.get("type") == "error":
-                    raise RuntimeError("OpenCode returned an error; check opencode auth and model selection")
-                if event.get("type") == "text":
-                    parts.append(event.get("part", {}).get("text", ""))
-            result = "\n".join(parts)
+        result = "\n".join(parts)
         if not result.strip():
             raise RuntimeError(f"{config.provider} returned no answer; check login and subscription limits")
         return result
 
 
-async def answer(config, db, question, course=None, history=(), progress=lambda text: None):
+def _event(line):
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return {}
+    return event if isinstance(event, dict) else {}
+
+
+async def answer(config, db, question, course=None, history=(), progress=lambda text: None,
+                 on_text=lambda text: None):
     if not db.documents(course):
         return "No cached course data yet. Run /setup, then /sync.", []
     progress("Searching your courses (local embeddings may be loading)…" if config.embed_model
@@ -132,4 +169,4 @@ User question: {question[:6000]}
         progress(f"Waiting for Ollama ({config.model or 'no model selected'}); model may be loading…")
     else:
         progress(f"Waiting for {config.provider.capitalize()} to answer…")
-    return await generate(config, prompt), sources
+    return await generate(config, prompt, on_text), sources

@@ -14,10 +14,11 @@ from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Mark
 
 from .answer import answer
 from .canvas import Canvas, sync
+from .store import STALE_HOURS
 
-HELP = """Ask about policies, deadlines, announcements, or grades. Answers link to Canvas sources.
+HELP = """Home shows upcoming work and what Canvas changed in the last week. Ask about policies, deadlines, announcements, or grades; answers link to Canvas sources.
 
-**/setup** choose courses · **/sync** refresh · **/browse** read everything cached
+**/home** dashboard · **/sync** refresh · **/changes** recent changes · **/browse** read everything cached
 
 **/upcoming** next 30 days · **/overdue** past-due unsubmitted work · **/grades** Canvas grades
 
@@ -247,6 +248,7 @@ class CanvasApp(App):
         self.demo = demo
         self.history = []
         self.busy = False
+        self.cancelling = False
         self.status_text = ""
         self.started_at = 0.0
 
@@ -258,6 +260,7 @@ class CanvasApp(App):
             yield Button("Sync", id="sync")
             yield Button("Browse", id="browse")
         with Horizontal(id="shortcuts"):
+            yield Button("Home", id="home")
             yield Button("Upcoming", id="upcoming")
             yield Button("Grades", id="grades")
             yield Button("Coverage", id="coverage")
@@ -275,15 +278,25 @@ class CanvasApp(App):
         self.status_widget = self.query_one("#status", Static)
         self.set_interval(0.2, self.render_status)
         self.refresh_courses()
-        await self.say(HELP)
-        if self.demo:
+        if not self.demo:
+            await self.say(HELP)
+        else:
             await self.say("**Demo · Fictional classes, no network or model calls.**\n\n"
-                           "Try Upcoming, Grades, Browse, or ask about attendance. Replies show matching sample excerpts. "
+                           "Try Home, Upcoming, Grades, Browse, or ask about attendance. Replies show matching sample excerpts. "
                            "The Canvas connection currently supports personal testing; broader use needs OAuth.")
+        cached = bool(self.db.documents())
+        if cached:
+            await self.show_home()
         self.set_status(f"Ready · {self.config.provider} · {len(self.db.documents())} cached documents")
         self.query_one("#question", Input).focus()
         if self.start_setup or not self.config.courses:
             self.show_setup()
+        elif cached and not self.demo and self.db.stale(STALE_HOURS):
+            await self.say(f"Cache is older than {STALE_HOURS} hours; syncing now. Esc cancels.")
+            self.run_sync()
+
+    async def show_home(self, days=14):
+        await self.say("**Home · Your dashboard**\n\n" + self.db.dashboard(self.course, days=days))
 
     def refresh_courses(self):
         self.query_one("#scope", Select).set_options([("All selected courses", 0)] +
@@ -297,10 +310,11 @@ class CanvasApp(App):
 
     async def say(self, text, role="system"):
         chat = self.query_one("#chat", VerticalScroll)
-        await chat.mount(Horizontal(Static(classes="message-bar"),
-                                    Markdown(text, classes=role, open_links=False),
-                                    classes=f"message {role}"))
-        chat.scroll_end(animate=False)
+        body = Markdown(text, classes=role, open_links=False)
+        await chat.mount(Horizontal(Static(classes="message-bar"), body, classes=f"message {role}"))
+        # Markdown lays out after mount, so scroll_end would stop short; anchor follows growth.
+        chat.anchor()
+        return body
 
     @on(Markdown.LinkClicked)
     def link_clicked(self, event):
@@ -339,20 +353,20 @@ class CanvasApp(App):
 
     def begin_work(self, message):
         self.busy = True
+        self.cancelling = False
         self.started_at = monotonic()
         self.query_one("#cancel-work", Button).disabled = False
-        for selector in ("#scope", "#setup", "#sync", "#browse", "#upcoming", "#grades", "#coverage"):
+        for selector in ("#scope", "#setup", "#sync", "#browse", "#home", "#upcoming", "#grades", "#coverage"):
             self.query_one(selector).disabled = True
         self.set_status(message)
 
     def finish_work(self, message):
         self.busy = False
         self.query_one("#cancel-work", Button).disabled = True
-        for selector in ("#scope", "#setup", "#sync", "#browse", "#upcoming", "#grades", "#coverage"):
+        for selector in ("#scope", "#setup", "#sync", "#browse", "#home", "#upcoming", "#grades", "#coverage"):
             self.query_one(selector).disabled = False
         self.set_status(message)
         self.query_one("#question", Input).focus()
-
 
     def show_setup(self):
         if self.demo:
@@ -371,8 +385,8 @@ class CanvasApp(App):
             self.action_browse()
         elif event.button.id == "cancel-work":
             self.action_cancel()
-        elif event.button.id in {"upcoming", "grades", "coverage"}:
-            await self.command("/status" if event.button.id == "coverage" else "/" + event.button.id)
+        elif event.button.id in {"home", "upcoming", "grades", "coverage"}:
+            await self.command({"home": "/home", "coverage": "/status"}.get(event.button.id, "/" + event.button.id))
 
     def action_browse(self):
         if not self.busy:
@@ -383,7 +397,9 @@ class CanvasApp(App):
             self.run_sync()
 
     def action_cancel(self):
-        if self.busy:
+        # A second Esc would cancel the subprocess kill sequence already in progress.
+        if self.busy and not self.cancelling:
+            self.cancelling = True
             self.set_status("Cancelling…")
             self.workers.cancel_all()
 
@@ -402,7 +418,8 @@ class CanvasApp(App):
             await sync(self.config, self.db, self.set_status)
             self.refresh_courses()
             await self.say(self.db.snapshot_summary())
-            outcome = "Ready · Sync finished; see coverage above"
+            await self.show_home()
+            outcome = "Ready · Sync finished; changes and dashboard shown above"
         except asyncio.CancelledError:
             outcome = "Cancelled · Completed sync sections remain cached"
             raise
@@ -433,6 +450,10 @@ class CanvasApp(App):
             self.run_sync()
         elif cmd == "/browse":
             self.action_browse()
+        elif cmd == "/home":
+            await self.show_home()
+        elif cmd == "/changes":
+            await self.say(self.db.changes_markdown(self.course))
         elif cmd in {"/upcoming", "/overdue"}:
             rows = self.db.upcoming(self.course, overdue=cmd == "/overdue")
             await self.say("**Cached deadlines** (local timezone; refresh with /sync)\n\n" + ("\n".join(
@@ -489,6 +510,7 @@ class CanvasApp(App):
     async def ask(self, question):
         self.begin_work("Searching your courses…")
         outcome = "Ready · Reply below or choose a class above"
+        bubble = None
         try:
             await self.say("**You:** " + question, role="user")
             if self.demo:
@@ -497,20 +519,38 @@ class CanvasApp(App):
                     "\n\n".join(f"**{h['title']}**\n\n{h['text']}" for h in hits)
                     or "No matches. Try attendance, exam, or office hours.")
             else:
+                label = "**Canvas Buddy · AI answer:**\n\n"
+                bubble = await self.say(label + "_Thinking…_", role="assistant")
+                shown_at = 0.0
+
+                def stream(text):
+                    # Re-rendering Markdown per token is wasteful; a few updates a second reads as live.
+                    nonlocal shown_at
+                    if monotonic() - shown_at >= 0.25:
+                        shown_at = monotonic()
+                        bubble.update(label + text)
                 result, _ = await answer(self.config, self.db, question, self.course, self.history,
-                                         progress=self.set_status)
-            label = "Canvas Buddy · sample data" if self.demo else "Canvas Buddy · AI answer"
-            await self.say(f"**{label}:**\n\n" + result, role="assistant")
+                                         progress=self.set_status, on_text=stream)
+                await bubble.update(label + result)
+            if self.demo:
+                await self.say("**Canvas Buddy · sample data:**\n\n" + result, role="assistant")
             self.history.append((question, result))
             self.history = self.history[-3:]
         except asyncio.CancelledError:
             outcome = "Cancelled · Ready for your next question"
+            if bubble:
+                await bubble.parent.remove()
             raise
         except TimeoutError:
             outcome = "Timed out · Try again or change /provider"
+            if bubble:
+                await bubble.parent.remove()
             await self.say("The model did not reply within 4 minutes. Try again or change /provider.")
         except Exception as e:
             outcome = "Could not answer · Try again or change /provider"
+            if bubble:
+                await bubble.parent.remove()
             await self.say(f"Could not answer: {self.config.error(e)}")
         finally:
             self.finish_work(outcome)
+

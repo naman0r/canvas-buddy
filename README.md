@@ -4,7 +4,7 @@ Ask questions about your Canvas classes from a small terminal app. Answers link 
 
 MIT licensed. Local storage. Read-only Canvas access. Uses your existing Codex/OpenCode CLI login, or a local Ollama chat model.
 
-**Current status:** the source branch is a personal-testing preview (0.3.0.dev0); Homebrew remains at 0.2.0. Broader account onboarding requires OAuth. See the [review](docs/REVIEW.md) and [Canvas authentication requirements](https://developerdocs.instructure.com/services/canvas/oauth2/file.oauth#manual-token-generation).
+**Current status:** 0.3.0 is a personal-testing release. Broader account onboarding requires OAuth. See the [review](docs/REVIEW.md) and [Canvas authentication requirements](https://developerdocs.instructure.com/services/canvas/oauth2/file.oauth#manual-token-generation).
 
 ## Try the source preview without credentials
 
@@ -56,7 +56,7 @@ Try questions like:
 
 Choose a class in the top dropdown when asking about “this class.” Your messages have a yellow accent; replies have a cyan accent. An animated status shows the current step and elapsed time, then returns to **Ready**. Cancel with Esc or the **Cancel** button.
 
-**Sync is manual.** Click Sync or press Ctrl+R for fresh data. Answers use cached timestamps and may be incomplete; follow the source links for important policies and deadlines.
+**Home** opens on launch with upcoming work, what Canvas posted, moved, or removed in the last week, and current grades. Once courses are cached, sync runs automatically at launch when the cache is more than six hours old; click Sync or press Ctrl+R any time. Courses sync three at a time. Replies appear as the model produces them: token by token with Ollama, per message with Codex and OpenCode. Answers use cached timestamps and may be incomplete; follow the source links for important policies and deadlines.
 
 ## Optional semantic search
 
@@ -72,6 +72,8 @@ Enable **Use local Ollama embeddings** in Courses setup and save/sync. The embed
 
 | Command | Purpose |
 | --- | --- |
+| `/home` | Dashboard: upcoming work, recent changes, grades |
+| `/changes` | Everything Canvas posted, moved, or removed in the last 7 days |
 | `/setup` | Change Canvas connection, provider, embeddings, or courses |
 | `/sync` or Ctrl+R | Refresh content and embed changed text |
 | `/browse` or Ctrl+B | Read full cached documents |
@@ -95,6 +97,9 @@ canvas-buddy ask --course 123 "When is the exam?"
 canvas-buddy search "attendance"
 canvas-buddy upcoming
 canvas-buddy grades
+canvas-buddy digest --days 7                 # Dashboard as text; pair with sync --if-stale in a shell alias
+canvas-buddy changes
+canvas-buddy sync --if-stale                 # Skips when the cache is under six hours old
 ```
 
 The legacy `canvas-rag` command remains available. `--provider` and `--model` override a single CLI invocation. Shell scripts can use `CANVAS_URL` / `CANVAS_PAT` and `canvas-buddy setup --courses 123,456`.
@@ -111,6 +116,7 @@ Imported when your account can access it:
 - Classic quiz metadata and availability; course calendar events from 180 days ago through 365 days ahead. Assignment dates are imported independently.
 - Files: text from PDF, DOCX, PPTX, XLSX and common text formats. Download limit: 25 MB per file. Original files are not retained. Spreadsheet extraction is raw text, not formula evaluation.
 - Inbox conversations explicitly associated with selected courses, without marking them read.
+- Canvas to-do items per course, which include peer reviews and instructor to-dos that never appear in the assignment list.
 
 `/status` distinguishes complete endpoint snapshots, partial linked-content discovery, and failures. Some file records contain only metadata and a link because extraction or access failed.
 
@@ -126,7 +132,7 @@ New installations store data under `~/.local/share/canvas-buddy` (`$XDG_DATA_HOM
 
 API pagination must stay on your Canvas origin. File downloads do not forward the PAT. Codex runs ephemerally with user configuration, host skill discovery and action tools disabled; OpenCode uses a tool-denied agent with sharing disabled. These restrictions reduce exposure; they are not a substitute for your provider's privacy/security policies.
 
-Environment variables override saved preferences: `CANVAS_URL`, `CANVAS_PAT`, `CANVAS_RAG_PROVIDER`, `CANVAS_RAG_MODEL`, `OLLAMA_URL`, and `CANVAS_RAG_EMBED_MODEL`. A `.env` in the current directory is also read for compatibility with development checkouts. To switch schools, use setup and provide the new token, or choose a new data directory.
+Environment variables override saved preferences: `CANVAS_URL`, `CANVAS_PAT`, `CANVAS_RAG_PROVIDER`, `CANVAS_RAG_MODEL`, `OLLAMA_URL`, and `CANVAS_RAG_EMBED_MODEL`. A `.env` is read only when the current directory is a source checkout of this project. To switch schools, use setup and provide the new token, or choose a new data directory.
 
 ## Updates and troubleshooting
 
@@ -159,7 +165,7 @@ uv run ruff check canvas_rag tests
 uv build
 ```
 
-Five runtime dependencies: Textual, HTTPX, Beautiful Soup, python-dotenv and pypdf. SQLite/FTS5, float-vector storage and similarity scoring use Python's standard library. Unchanged files and embeddings are reused; resource snapshots update atomically. Failed endpoints retain previous timestamps and cached data. Concurrent syncs are blocked.
+Five runtime dependencies: Textual, HTTPX, Beautiful Soup, python-dotenv and pypdf. SQLite/FTS5, float-vector storage and similarity scoring use Python's standard library. Unchanged files and embeddings are reused; resource snapshots update atomically. Failed endpoints retain previous timestamps and cached data. Concurrent syncs of the same cache are blocked.
 
 Inspired by [canvas-mcp](https://github.com/vishalsachdev/canvas-mcp), implemented independently against the [Canvas REST API](https://developerdocs.instructure.com/services/canvas). See [RELEASING.md](RELEASING.md) for the release/tap workflow.
 

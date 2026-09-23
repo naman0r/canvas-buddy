@@ -29,6 +29,11 @@ def seed(home):
     for kind, item, body in samples:
         db.replace(101, kind, [record(101, kind, item, config.url, body)])
         db.coverage(101, kind, "ok", "Fictional demo data")
+    db.change(101, "announcement", "new", "Observatory visit", "posted since last sync")
+    db.change(101, "assignment", "changed", "Moon observation journal",
+              "deadline moved from Sep 02, 21:00 to " + datetime.fromisoformat(due.replace("Z", "+00:00"))
+              .astimezone().strftime("%b %d, %H:%M"))
+    db.change(101, "grade", "changed", "Introduction to Astronomy", "current score 89 → 92")
     return config, db
 
 
