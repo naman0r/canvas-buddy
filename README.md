@@ -58,6 +58,17 @@ Choose a class in the top dropdown when asking about “this class.” Your mess
 
 **Home** opens on launch with upcoming work, what Canvas posted, moved, or removed in the last week, and current grades. Once courses are cached, sync runs automatically at launch when the cache is more than six hours old; click Sync or press Ctrl+R any time. Courses sync three at a time. Replies appear as the model produces them: token by token with Ollama, per message with Codex and OpenCode. Answers use cached timestamps and may be incomplete; follow the source links for important policies and deadlines.
 
+## Course context: your notes and course websites
+
+Canvas rarely has the whole picture. Open **Context** (or `/context`) to give each class:
+
+- **Notes** included in every question, such as "we get a 48-hour extension on homework" or "assignments are on Pawtograder, not Canvas". They also appear in the Planner.
+- **Course websites.** Add the professor's site; sync fetches it with the pages and PDFs it links to on the same site (one level, up to 40 pages) and any shared Google Docs, Slides or Sheets it links to. The pages then appear in search, answers and the Library under **Course website**, and edits show in the change log. External links already found in the course's Canvas content are listed, so adding one is a single choice. Pages that need a login cannot be read.
+
+From the command line: `canvas-buddy context` lists everything; `canvas-buddy context --course ID --note "..." --site URL` sets notes and adds and fetches a site; `--remove-site URL` removes one.
+
+Website requests are plain GETs without your Canvas token or any cookies. Redirects are followed only within the site you added (or, for Google files, Google's own hosts). The model still has no internet access; it reads fetched pages from the local cache.
+
 ## Optional semantic search
 
 Keyword search works out of the box. To also match similar meanings:
@@ -76,6 +87,7 @@ Enable **Use local Ollama embeddings** in Courses setup and save/sync. The embed
 | `/changes` | Everything Canvas posted, moved, or removed in the last 7 days |
 | `/setup` | Change Canvas connection, provider, embeddings, or courses |
 | `/sync` or Ctrl+R | Refresh content and embed changed text |
+| `/context` or Context | Your notes and course websites for each class |
 | `/browse` or Ctrl+B | Library: each course's modules, announcements, files and pages, with a reader that jumps to PDF pages and slides. **Ask about this** pins a document to the conversation. |
 | `/search attendance` | Local search without calling a chat model |
 | `/plan`, `/upcoming` or Upcoming | Planner: work by day in local time, overdue first, work with no Canvas due date last; Enter opens an item, `a` asks about it |

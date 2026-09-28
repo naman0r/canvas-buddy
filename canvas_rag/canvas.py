@@ -376,6 +376,8 @@ async def _sync(config, db, progress):
                 out.append(record(0, "inbox", full, api.base))
             return out
         await collect(0, "inbox", inbox)
+    from .sites import sync_sites
+    await sync_sites(db, progress, config.courses)
     db.set_meta("extract_version", EXTRACT_VERSION)
     progress("Indexing new and changed text…")
     await db.embed(config, progress)

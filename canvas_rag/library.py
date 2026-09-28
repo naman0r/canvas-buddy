@@ -10,7 +10,7 @@ from textual.widgets import Button, Input, Label, MarkdownViewer, Static, Tree
 from .store import MARKER
 
 # Reading order within a course. Grades, weights, staff and to-do rows are facts, not reading.
-SECTIONS = [("announcement", "Announcements"), ("module", "Modules"), ("assignment", "Assignments"),
+SECTIONS = [("site", "Course website"), ("announcement", "Announcements"), ("module", "Modules"), ("assignment", "Assignments"),
             ("quiz", "Quizzes"), ("discussion", "Discussions"), ("page", "Pages"), ("file", "Files"),
             ("submission", "Feedback"), ("event", "Events")]
 MODULE_KINDS = {"Page": "page", "File": "file", "Assignment": "assignment", "Quiz": "quiz",
@@ -193,7 +193,9 @@ class Library(ModalScreen):
         markers = sum(1 for line in doc["body"].splitlines() if MARKER.fullmatch(line.strip()) or line.startswith("## "))
         viewer.show_table_of_contents = markers >= 3
         self.query_one("#doc-hint", Static).update(doc["url"])
-        self.query_one("#open-source", Button).disabled = False
+        button = self.query_one("#open-source", Button)
+        button.disabled = False
+        button.label = "Open website" if doc["kind"] == "site" else "Open in Canvas"
         self.query_one("#ask-doc", Button).disabled = False
 
         async def load():

@@ -18,7 +18,8 @@ PART_CHARS = 8000
 
 TOOLS = [
     {"name": "search", "description": "Search every cached Canvas document (syllabi, pages, files, slides, "
-     "announcements, assignments, discussions). Returns ranked excerpts with document ids.",
+     "announcements, assignments, discussions) and the course websites the student added. Returns ranked "
+     "excerpts with document ids.",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "What to look for, in your own words"},
          "course": {"type": "integer", "description": "Optional course id from list_courses"}},
@@ -29,7 +30,7 @@ TOOLS = [
          "id": {"type": "string"}, "part": {"type": "integer", "description": "Part number, from 1"}},
          "required": ["id"]}},
     {"name": "list_documents", "description": "List cached documents with ids, optionally filtered by "
-     "course, type (page, file, assignment, announcement, discussion, module, quiz, event, submission) "
+     "course, type (page, file, site, assignment, announcement, discussion, module, quiz, event, submission) "
      "or words in the title. Use it to find a file or module the search missed.",
      "inputSchema": {"type": "object", "properties": {
          "course": {"type": "integer"}, "kind": {"type": "string"}, "title": {"type": "string"}}}},
@@ -95,8 +96,12 @@ class Lookup:
                 grade = next((d["body"].replace("\n", "; ") for d in self.db.documents(cid, "grade")), "not synced")
                 gaps = [f"{r['kind']} ({r['state']})" for r in self.db.conn.execute(
                     "SELECT kind,state FROM coverage WHERE course=? AND state!='ok'", (cid,))]
+                extra = self.db.context().get(cid, {"notes": "", "sites": []})
                 out.append(f"Course {cid}: {title}\nStaff: {staff or 'unknown'}\nWeights: {weights or 'not published'}"
-                           f"\nGrade: {grade}" + (f"\nIncomplete sync: {', '.join(gaps)}" if gaps else ""))
+                           f"\nGrade: {grade}" + (f"\nIncomplete sync: {', '.join(gaps)}" if gaps else "")
+                           + (f"\nStudent's notes: {extra['notes']}" if extra["notes"] else "")
+                           + (f"\nCourse websites (cached as kind 'site'): {', '.join(extra['sites'])}"
+                              if extra["sites"] else ""))
             return "\n\n".join(out) or "No courses cached."
         if name == "deadlines":
             rows = self.db.upcoming(self._course(args.get("course")), days=int(args.get("days") or 14),

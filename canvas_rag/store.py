@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -109,6 +110,7 @@ class Store:
                 PRIMARY KEY(course,kind));
             CREATE TABLE IF NOT EXISTS changes(
                 course INTEGER, kind TEXT, change TEXT, title TEXT, detail TEXT, at TEXT);
+            CREATE TABLE IF NOT EXISTS context(course INTEGER PRIMARY KEY, notes TEXT, sites TEXT);
         """)
         if "location" not in {r[1] for r in self.conn.execute("PRAGMA table_info(chunks)")}:
             self.conn.execute("ALTER TABLE chunks ADD COLUMN location TEXT")
@@ -435,6 +437,36 @@ class Store:
         """Unfinished assignments Canvas gives no due date: work the planner must not silently drop."""
         return [d for d in self.documents(course, "assignment")
                 if not d["raw"].get("due_at") and status(d["raw"]) in {"to do", "missing"}]
+
+    def context(self):
+        """What the student added about each course: {course: {"notes": str, "sites": [url, ...]}}.
+        Kept when a course is deselected; it is the student's writing, not Canvas data."""
+        return {r["course"]: {"notes": r["notes"] or "", "sites": json.loads(r["sites"] or "[]")}
+                for r in self.conn.execute("SELECT * FROM context")}
+
+    def set_context(self, course, notes=None, sites=None):
+        old = self.context().get(course, {"notes": "", "sites": []})
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO context VALUES(?,?,?)", (
+                course, old["notes"] if notes is None else notes.strip(),
+                json.dumps(old["sites"] if sites is None else list(dict.fromkeys(sites)))))
+
+    def suggested_sites(self, course):
+        """External pages this course's Canvas content links to, most-linked first: the course
+        websites professors point students at, offered so adding one is a single choice."""
+        identity = self.meta("identity")
+        base = urlsplit(json.loads(identity)[0]).netloc if identity else ""
+        counts = {}
+        for d in self.documents(course):
+            for url in re.findall(r"https?://[^\s\"'<>\\)]+", json.dumps(d["raw"])):
+                parts = urlsplit(url.rstrip(".,;"))
+                if (parts.netloc and parts.netloc != base and "instructure" not in parts.netloc
+                        and not re.search(r"\.(png|jpe?g|gif|svg|css|js|ico)$", parts.path, re.I)
+                        and "gravatar" not in parts.netloc):
+                    clean = parts._replace(query="", fragment="").geturl()
+                    counts[clean] = counts.get(clean, 0) + 1
+        taken = set(self.context().get(course, {}).get("sites", []))
+        return [u for u in sorted(counts, key=lambda u: (-counts[u], u)) if u not in taken][:12]
 
     def course_names(self):
         return {d["course"]: short(d["title"]) for d in self.documents(kind="course")}

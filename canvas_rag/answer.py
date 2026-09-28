@@ -191,10 +191,16 @@ async def answer(config, db, question, course=None, history=(), progress=lambda 
     coverage = [dict(r) for r in db.conn.execute("SELECT * FROM coverage WHERE ? IS NULL OR course IN (0,?)",
                                                (course, course))]
     coverage = [{**r, "detail": r["detail"][:300]} for r in coverage]
+    names = db.course_names()
     doc = db.get(pinned) if pinned else None
     focus = (f"The student pinned this document; questions are about it unless they say otherwise. "
              f"Its first part is below; read_document id {doc['id']} has the rest.\n"
              f"{doc['title']} ({doc['kind']}) {doc['url']}\n{split(doc['body'])[0]}\n" if doc else "")
+    context = db.context()
+    notes = "\n".join(f"{names.get(c, c)}: {v['notes']}" for c, v in context.items()
+                      if v["notes"] and c in names and (not course or c == course))
+    sites = "\n".join(f"{names.get(c, c)}: " + ", ".join(v["sites"]) for c, v in context.items()
+                      if v["sites"] and c in names and (not course or c == course))
     need_facts = re.search(r"due|upcoming|assign|exam|quiz|grade|score|missing|late|submit|deadline|schedule|week|today|tomorrow", question, re.I)
     facts = db.facts(course) if need_facts else "\n".join(
         f"{d['course']}: {d['title']}" for d in db.documents(course, "course"))
@@ -213,6 +219,13 @@ text was not extracted, say what cannot be verified. A null grade is unknown, ne
 current and final grades; report Canvas's own values, do not infer an official grade. Assignment due_at
 is personalized for this student. A missing due date does not mean no work. Do not imply this is live:
 use the sync timestamps. Dates are ISO timestamps; convert for the user's local timezone below.
+Notes the student wrote about their courses. These are the student's own corrections and context, not
+course data: apply them (for example an extension that moves every Canvas deadline, or "assignments are
+posted on the course website") and say when an answer relies on one.
+{notes or "(none)"}
+Course websites the student added; their pages are cached as documents of kind "site" in that course,
+so search and read_document reach them:
+{sites or "(none)"}
 Now: {datetime.now().astimezone().isoformat()}
 Course filter: {course or 'all selected courses'}
 Coverage: {json.dumps(coverage)}
