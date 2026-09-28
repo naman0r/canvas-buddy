@@ -114,7 +114,7 @@ Imported when your account can access it:
 - Announcements, discussions and accessible threads.
 - Pages, front page, modules and linked content, even when the Pages/Files listing is hidden.
 - Classic quiz metadata and availability; course calendar events from 180 days ago through 365 days ahead. Assignment dates are imported independently.
-- Files: text from PDF, DOCX, PPTX, XLSX and common text formats. Download limit: 25 MB per file. Original files are not retained. Spreadsheet extraction is raw text, not formula evaluation.
+- Files: text from PDF, DOCX, PPTX, XLSX and common text formats. Download limit: 25 MB per file. Original files are not retained. Page, slide, sheet and heading structure is kept so answers can cite "Slide 12" or "Page 3". Spreadsheets are read as cell values row by row, not formulas.
 - Inbox conversations explicitly associated with selected courses, without marking them read.
 - Canvas to-do items per course, which include peer reviews and instructor to-dos that never appear in the assignment list.
 

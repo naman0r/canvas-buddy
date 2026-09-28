@@ -5,9 +5,9 @@ from array import array
 import httpx
 import pytest
 
-from canvas_rag.canvas import extract, record
+from canvas_rag.canvas import describe, extract, plain, record
 from canvas_rag.config import Config
-from canvas_rag.store import Store
+from canvas_rag.store import Store, chunk
 
 
 @pytest.fixture
@@ -84,12 +84,14 @@ def test_extract_docx_pptx_xlsx():
         "word/settings.xml": "<w:settings xmlns:w='w'><w:zoom>Hidden</w:zoom></w:settings>",
     })
     pptx = office({
-        "ppt/slides/slide1.xml": "<p:sld xmlns:p='p'><p:txBody><a:t xmlns:a='a'>Giraffe</a:t></p:txBody></p:sld>",
+        "ppt/slides/slide1.xml": "<p:sld xmlns:p='p' xmlns:a='a'><p:txBody><a:p><a:r><a:t>Giraffe</a:t></a:r></a:p>"
+                                 "</p:txBody></p:sld>",
         "ppt/slideLayouts/slideLayout1.xml": "<p:sldLayout xmlns:p='p'><a:t xmlns:a='a'>Hidden</a:t></p:sldLayout>",
     })
     xlsx = office({
         "xl/sharedStrings.xml": "<sst xmlns='s'><si><t>Walrus</t></si></sst>",
-        "xl/worksheets/sheet1.xml": "<worksheet xmlns='s'><sheetData><row><c><v>42</v></c></row></sheetData></worksheet>",
+        "xl/worksheets/sheet1.xml": "<worksheet xmlns='s'><sheetData><row><c t='s'><v>0</v></c><c><v>42</v></c>"
+                                    "</row></sheetData></worksheet>",
         "xl/styles.xml": "<styleSheet xmlns='s'><font>Hidden</font></styleSheet>",
     })
     for data, name, words in [(docx, "a.docx", ["Zebra"]), (pptx, "b.pptx", ["Giraffe"]),
@@ -97,6 +99,78 @@ def test_extract_docx_pptx_xlsx():
         text = extract(data, name)
         assert all(w in text for w in words), (name, text)
         assert "Hidden" not in text
+
+
+def test_extract_keeps_office_structure():
+    slide = "<p:sld xmlns:p='p' xmlns:a='a'><a:p><a:r><a:t>{}</a:t></a:r></a:p></p:sld>"
+    pptx = office({f"ppt/slides/slide{n}.xml": slide.format(f"Topic {n}") for n in (1, 2, 10)})
+    assert [line for line in extract(pptx, "deck.pptx").splitlines() if line.startswith("Slide")] == [
+        "Slide 1", "Slide 2", "Slide 10"]
+    docx = office({"word/document.xml": "<w:document xmlns:w='w'><w:body>"
+                   "<w:p><w:pPr><w:pStyle w:val='Heading1'/></w:pPr><w:r><w:t>Grading</w:t></w:r></w:p>"
+                   "<w:p><w:r><w:t>Exams </w:t></w:r><w:r><w:t>60%</w:t></w:r></w:p></w:body></w:document>"})
+    assert extract(docx, "syllabus.docx") == "## Grading\nExams 60%"
+    xlsx = office({"xl/sharedStrings.xml": "<sst xmlns='s'><si><t>Week</t></si><si><t>Topic</t></si></sst>",
+                   "xl/worksheets/sheet1.xml": "<worksheet xmlns='s'><sheetData>"
+                   "<row><c t='s'><v>0</v></c><c t='s'><v>1</v></c></row>"
+                   "<row><c><v>3</v></c><c t='inlineStr'><is><t>Bonds</t></is></c></row></sheetData></worksheet>"})
+    assert extract(xlsx, "schedule.xlsx") == "Sheet 1\nWeek | Topic\n3 | Bonds"
+
+
+def test_plain_keeps_headings_lists_and_inline_text():
+    html = "<h2>Late work</h2><p>Lose <b>10%</b> per day.</p><ul><li>Email first</li><li>Max one week</li></ul>"
+    assert plain(html) == "## Late work\nLose 10% per day.\n- Email first\n- Max one week"
+
+
+def test_describe_drops_api_envelope():
+    body = describe("assignment", {"id": 7, "name": "HW01", "due_at": "2026-10-01T03:59:00Z", "points_possible": 100,
+                                   "secure_params": "eyJ0eXAi", "anonymous_grading": False, "allowed_attempts": -1,
+                                   "submission_types": ["online_upload"], "description": "<p>Upload a PDF.</p>",
+                                   "submission": {"workflow_state": "unsubmitted"}})
+    assert "eyJ0eXAi" not in body and "anonymous_grading" not in body
+    assert "Points: 100" in body and "Attempts: unlimited" in body and "Submit as: online upload" in body
+    assert body.endswith("Upload a PDF.") and "Due: " in body
+
+
+def test_chunks_follow_pages_and_headings():
+    body = "Page 1\n## Grading\n" + " ".join(["exam"] * 150) + "\nPage 2\n## Late work\nLose 10% per day."
+    chunks = chunk(body)
+    assert [(c[0], c[1]) for c in chunks] == [("Page 1", "Grading"), ("Page 2", "Late work")]
+    assert chunks[1][2] == "Lose 10% per day."
+    long = chunk("Page 3\n" + " ".join(f"w{i}" for i in range(500)))
+    assert [c[0] for c in long] == ["Page 3"] * 3 and max(len(c[2].split()) for c in long) <= 220
+
+
+def test_chunk_text_names_course_and_location(db):
+    db.replace(1, "course", [record(1, "course", {"id": 1, "name": "Biology 101"}, "https://canvas.example", "")])
+    db.replace(1, "file", [doc(kind="file", id=5, title="Lecture 3.pdf", body="Page 4\nPhotosynthesis")])
+    row = db.conn.execute("SELECT text,location FROM chunks WHERE doc='1:file:5'").fetchone()
+    assert row["text"] == "Biology 101 · file · Lecture 3.pdf · Page 4\nPhotosynthesis"
+    assert row["location"] == "Page 4"
+
+
+def test_unchanged_chunks_keep_their_vectors(db):
+    db.replace(1, "page", [doc(body="First paragraph.")])
+    set_vector(db, "1:page:1", (1.0, 0.0), "m")
+    db.replace(1, "page", [doc(body="First paragraph.", extra=1)])
+    db.replace(1, "page", [doc(title="Syllabus", body="First paragraph.")])
+    assert db.conn.execute("SELECT model FROM chunks WHERE doc='1:page:1'").fetchone()[0] == "m"
+    db.replace(1, "page", [doc(body="Changed paragraph.")])
+    assert db.conn.execute("SELECT vector FROM chunks WHERE doc='1:page:1'").fetchone()[0] is None
+
+
+def test_opening_an_old_index_rechunks_it(config):
+    db = Store(config.home)
+    db.replace(1, "page", [doc(body="Page 1\nAttendance is required.")])
+    with db.conn:
+        db.conn.execute("UPDATE chunks SET location=NULL, text='old'")
+    db.set_meta("index_version", "1")
+    db.close()
+    db = Store(config.home)
+    try:
+        assert db.conn.execute("SELECT location FROM chunks").fetchone()[0] == "Page 1"
+    finally:
+        db.close()
 
 
 def test_extract_rejects_oversized_office_expansion():

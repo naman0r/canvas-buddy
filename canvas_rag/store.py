@@ -9,6 +9,60 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 STALE_HOURS = 6  # Auto-sync threshold shared by the TUI and `sync --if-stale`.
+INDEX_VERSION = "2"  # Bump when chunking changes; opening the store then re-chunks every document.
+CHUNK_WORDS = 220
+MARKER = re.compile(r"(Page|Slide|Sheet) (\d+)")
+
+
+def chunk(body):
+    """Split text into ~CHUNK_WORDS-word chunks along its structure, as (location, heading, text):
+    location spans the PDF pages or slides a chunk covers, heading is the nearest '## ' heading above it.
+    A chunk prefers to end before a heading, and repeats its last line in the next chunk for context."""
+    location, heading = None, None
+    lines, words, first, last, current_heading = [], 0, None, None, None
+
+    def span():
+        if not first:
+            return None
+        return first if first == last else f"{first}–{last.split()[-1]}"
+
+    def emit():
+        return (span(), current_heading, "\n".join(lines))
+
+    out = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if MARKER.fullmatch(line):
+            location = line
+            continue
+        if line.startswith("## "):
+            heading = line[3:]
+            if words >= CHUNK_WORDS // 2:
+                out.append(emit())
+                lines, words, first = [], 0, None
+            if not lines:
+                current_heading = heading
+                continue
+        pieces = line.split()
+        # A long unbroken line (common in PDF text) is cut into windows of its own.
+        for start in range(0, len(pieces), CHUNK_WORDS):
+            piece = " ".join(pieces[start:start + CHUNK_WORDS])
+            if words and words + len(piece.split()) > CHUNK_WORDS:
+                out.append(emit())
+                carry = lines[-1] if len(lines[-1].split()) < 60 else None
+                lines, words = ([carry], len(carry.split())) if carry else ([], 0)
+                first, current_heading = (last if carry else location), heading
+            if not lines:
+                current_heading = heading
+            first = first or location
+            last = location
+            lines.append(piece)
+            words += len(piece.split())
+    if lines or not out:
+        out.append(emit())
+    return out
 
 
 class Store:
@@ -26,7 +80,7 @@ class Store:
                 body TEXT, raw TEXT, hash TEXT, synced TEXT);
             CREATE TABLE IF NOT EXISTS chunks(
                 id INTEGER PRIMARY KEY, doc TEXT REFERENCES documents(id) ON DELETE CASCADE,
-                text TEXT, vector BLOB, model TEXT);
+                text TEXT, vector BLOB, model TEXT, location TEXT);
             CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(text, content='chunks', content_rowid='id');
             CREATE TRIGGER IF NOT EXISTS chunk_insert AFTER INSERT ON chunks BEGIN
                 INSERT INTO search(rowid,text) VALUES(new.id,new.text); END;
@@ -38,6 +92,13 @@ class Store:
             CREATE TABLE IF NOT EXISTS changes(
                 course INTEGER, kind TEXT, change TEXT, title TEXT, detail TEXT, at TEXT);
         """)
+        if "location" not in {r[1] for r in self.conn.execute("PRAGMA table_info(chunks)")}:
+            self.conn.execute("ALTER TABLE chunks ADD COLUMN location TEXT")
+        if self.meta("index_version") != INDEX_VERSION:
+            with self.conn:
+                for row in self.conn.execute("SELECT id,course,kind,title,body FROM documents").fetchall():
+                    self._index(row["id"], row["course"], row["kind"], row["title"], row["body"])
+            self.set_meta("index_version", INDEX_VERSION)
 
     def close(self):
         self.conn.close()
@@ -84,6 +145,14 @@ class Store:
             "SELECT * FROM changes WHERE (? IS NULL OR course=?) ORDER BY rowid DESC LIMIT 60",
             (course, course)).fetchall()
 
+    def meta(self, key):
+        row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key, value):
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (key, value))
+
     def mark_synced(self):
         with self.conn:
             self.conn.execute("INSERT OR REPLACE INTO meta VALUES('last_sync',?)",
@@ -106,12 +175,16 @@ class Store:
                                       (course, kind)).fetchone()
             label = self._course_name(course) if kind == "grade" else None
             ids = {r["id"] for r in records}
-            for row in self.conn.execute("SELECT id,title FROM documents WHERE course=? AND kind=?", (course, kind)).fetchall():
-                if row[0] not in ids:
-                    if prior:
-                        self.conn.execute("INSERT INTO changes VALUES(?,?,?,?,?,?)",
-                                          (course, kind, "removed", label or row["title"], "", now))
-                    self.conn.execute("DELETE FROM documents WHERE id=?", (row[0],))
+            existing = dict(self.conn.execute("SELECT id,title FROM documents WHERE course=? AND kind=?",
+                                              (course, kind)).fetchall())
+            removed = {id: title for id, title in existing.items() if id not in ids}
+            # Re-uploading a file gives it a new Canvas id; same title in and out is one replacement.
+            replaced = set(removed.values()) & {r["title"] for r in records if r["id"] not in existing}
+            for id, title in removed.items():
+                if prior and title not in replaced:
+                    self.conn.execute("INSERT INTO changes VALUES(?,?,?,?,?,?)",
+                                      (course, kind, "removed", label or title, "", now))
+                self.conn.execute("DELETE FROM documents WHERE id=?", (id,))
             for r in records:
                 digest = hashlib.sha256((r["title"] + "\n" + r["body"]).encode()).hexdigest()
                 old = self.conn.execute("SELECT * FROM documents WHERE id=?", (r["id"],)).fetchone()
@@ -120,25 +193,40 @@ class Store:
                     body=excluded.body,raw=excluded.raw,hash=excluded.hash,synced=excluded.synced""",
                     (r["id"], course, kind, r["title"], r["url"], r["body"], json.dumps(r["raw"]), digest, now))
                 if not old and prior:
+                    replacement = r["title"] in replaced
                     self.conn.execute("INSERT INTO changes VALUES(?,?,?,?,?,?)",
-                                      (course, kind, "new", label or r["title"], "", now))
+                                      (course, kind, "changed" if replacement else "new", label or r["title"],
+                                       "replaced with a new upload" if replacement else "", now))
                 elif old and old["hash"] != digest:
                     before, after = json.loads(old["raw"]), r.get("raw") or {}
                     detail = self._change_detail(kind, before, after, old["title"], r["title"])
                     # Grades only count when a score moved; other kinds when non-activity content did.
-                    if detail or (kind != "grade" and self._signature(before) != self._signature(after)):
+                    # Titles are compared above; submission records once carried a synthetic one.
+                    if detail or (kind != "grade" and self._signature({**before, "title": None})
+                                  != self._signature({**after, "title": None})):
                         self.conn.execute("INSERT INTO changes VALUES(?,?,?,?,?,?)",
                                           (course, kind, "changed", label or r["title"], detail, now))
                 if not old or old["hash"] != digest:
-                    self.conn.execute("DELETE FROM chunks WHERE doc=?", (r["id"],))
-                    words = r["body"].split()
-                    for start in range(0, max(1, len(words)), 280):
-                        text = r["title"] + "\n" + " ".join(words[start:start + 340])
-                        self.conn.execute("INSERT INTO chunks(doc,text) VALUES(?,?)", (r["id"], text))
+                    self._index(r["id"], course, kind, r["title"], r["body"])
+
+    def _index(self, doc, course, kind, title, body):
+        """Replace a document's chunks, reusing the vector of any chunk whose text is unchanged."""
+        kept = {row[0]: (row[1], row[2]) for row in self.conn.execute(
+            "SELECT text,vector,model FROM chunks WHERE doc=? AND vector IS NOT NULL", (doc,))}
+        self.conn.execute("DELETE FROM chunks WHERE doc=?", (doc,))
+        # The header makes a chunk findable by course and type ("the ACCT midterm") and tells the
+        # model where an excerpt came from without a separate lookup.
+        header = f"{self._course_name(course) if course else 'Inbox'} · {kind} · {title}"
+        for location, heading, content in chunk(body):
+            text = header + (f" · {location}" if location else "") + (f"\n{heading}" if heading else "") + "\n" + content
+            vector, model = kept.get(text, (None, None))
+            self.conn.execute("INSERT INTO chunks(doc,text,vector,model,location) VALUES(?,?,?,?,?)",
+                              (doc, text, vector, model, location))
 
     # Fields Canvas rewrites whenever the student merely views something.
     VOLATILE = {"last_activity_at", "total_activity_time", "last_attended_at", "completed_at", "state",
-                "read_state", "unread_count", "completion_requirement", "todo_date", "updated_at"}
+                "read_state", "unread_count", "completion_requirement", "todo_date", "updated_at",
+                "canvadoc_session_url", "secure_params"}  # The last two are re-signed on every request.
 
     @classmethod
     def _signature(cls, value):
@@ -176,7 +264,8 @@ class Store:
             after = cls.when(new.get("due_at") if "due_at" in new else new.get("start_at"))
             if before != after and after:
                 parts.append(f"deadline moved from {before} to {after}" if before else f"deadline set for {after}")
-        if old_title != new_title:
+        # Submission titles are derived from the assignment name; whitespace-only edits are not renames.
+        if " ".join(old_title.split()) != new_title and kind != "submission":
             parts.append(f"retitled from {old_title!r}")
         return "; ".join(parts)
 
