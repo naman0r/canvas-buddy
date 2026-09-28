@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canvas Buddy</title>
+  <meta name="description" content="Ask questions about your Canvas classes from the terminal. Answers link to the slide or page they came from.">
+  <meta property="og:title" content="Canvas Buddy">
+  <meta property="og:description" content="Ask questions about your Canvas classes from the terminal. Answers link to the slide or page they came from.">
+  <meta property="og:image" content="https://trycanvasbuddy.vercel.app/og.png">
+  <meta property="og:url" content="https://trycanvasbuddy.vercel.app">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <span class="name">Canvas Buddy</span>
+    <a href="https://github.com/naman0r/canvas-buddy">GitHub<span data-star-count></span></a>
+  </header>
+
+  <main>
+    <section>
+      <h1>Ask your Canvas classes anything.</h1>
+      <p class="lede">A terminal app for your courses. Answers come from your syllabus, slides and announcements, and link to the page they came from.</p>
+      <div class="cta">
+        <div class="install">
+          <code>brew install naman0r/tap/canvas-buddy</code>
+          <button type="button" data-copy>Copy</button>
+        </div>
+        <a class="button" href="https://github.com/naman0r/canvas-buddy">Star on GitHub</a>
+      </div>
+      <img src="shots/ask.webp" width="2916" height="2052" alt="Canvas Buddy answering a question with links to the syllabus and lecture slides.">
+    </section>
+
+    <section>
+      <h2>Why</h2>
+      <p>Most AI tools for school are built to do your homework. You get the grade and skip the learning.</p>
+      <p>Canvas Buddy is built to help you learn. It knows your syllabus, slides, assignments and announcements, so it explains concepts the way your class taught them, keeps track of what's due, and flags when a deadline moves. Every answer cites its source, so you can check it and keep reading.</p>
+    </section>
+
+    <section class="shots">
+      <figure>
+        <img src="shots/home.webp" width="2916" height="2052" loading="lazy" alt="Home dashboard with upcoming work, recent changes and grades.">
+        <figcaption>Home: what's due, what changed, your grades.</figcaption>
+      </figure>
+      <figure>
+        <img src="shots/planner.webp" width="2916" height="2052" loading="lazy" alt="Planner listing work by day, overdue first.">
+        <figcaption>Planner: work by day, overdue first.</figcaption>
+      </figure>
+      <figure>
+        <img src="shots/library.webp" width="2916" height="2052" loading="lazy" alt="Library with a lecture PDF open at slide 12.">
+        <figcaption>Library: every file and page, opened at the cited slide.</figcaption>
+      </figure>
+    </section>
+
+    <section id="setup">
+      <h2>Setup</h2>
+      <ol>
+        <li>
+          Install with Homebrew. Run <code>canvas-buddy demo</code> to try it with fake classes first.
+          <pre><code>brew install naman0r/tap/canvas-buddy</code></pre>
+        </li>
+        <li>
+          Get a Canvas token. In Canvas, go to <b>Account › Settings › + New Access Token</b>, generate one and copy it. Canvas only shows it once. If the button is missing, your school has turned tokens off.
+        </li>
+        <li>
+          Sign in to a model: <code>codex login</code>, <code>opencode auth login</code>, or a local Ollama model. Optional; search, deadlines and grades work without one.
+        </li>
+        <li>
+          Run it, paste your Canvas URL and token, and pick your courses.
+          <pre><code>canvas-buddy</code></pre>
+        </li>
+      </ol>
+      <p class="muted">Read-only: it only makes GET requests to Canvas, keeps its cache on your computer, and never shows your token to the model.</p>
+    </section>
+
+    <section>
+      <h2>Request a feature</h2>
+      <form data-request>
+        <input name="title" required maxlength="120" placeholder="What should it do?">
+        <button class="button" type="submit">Open GitHub issue</button>
+      </form>
+    </section>
+  </main>
+
+  <footer>MIT licensed · Not affiliated with Instructure</footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
