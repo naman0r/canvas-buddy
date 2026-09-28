@@ -4,7 +4,7 @@ Ask questions about your Canvas classes from a small terminal app. Answers link 
 
 MIT licensed. Local storage. Read-only Canvas access. Uses your existing Codex/OpenCode CLI login, or a local Ollama chat model.
 
-**Current status:** 0.3.0 is a personal-testing release. Broader account onboarding requires OAuth. See the [review](docs/REVIEW.md) and [Canvas authentication requirements](https://developerdocs.instructure.com/services/canvas/oauth2/file.oauth#manual-token-generation).
+**Current status:** 0.4.0 is a personal-testing release. Broader account onboarding requires OAuth. See the [review](docs/REVIEW.md) and [Canvas authentication requirements](https://developerdocs.instructure.com/services/canvas/oauth2/file.oauth#manual-token-generation).
 
 ## Try the source preview without credentials
 
