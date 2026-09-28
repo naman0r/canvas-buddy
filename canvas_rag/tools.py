@@ -58,7 +58,7 @@ class Lookup:
     def _names(self):
         return {d["course"]: d["title"] for d in self.db.documents(kind="course")}
 
-    def _allowed(self, doc):
+    def allowed(self, doc):
         return doc and (not self.course or doc["course"] in (self.course, 0))
 
     async def call(self, name, args):
@@ -69,7 +69,7 @@ class Lookup:
             return "\n\n".join(f"[{h['doc']}] {h['url']}\n{h['text']}" for h in hits) or "No matching cached text."
         if name == "read_document":
             doc = self.db.get(str(args.get("id", "")))
-            if not self._allowed(doc):
+            if not self.allowed(doc):
                 return "No cached document with that id. Use search or list_documents to find ids."
             parts = split(doc["body"])
             n = min(max(int(args.get("part") or 1), 1), len(parts))

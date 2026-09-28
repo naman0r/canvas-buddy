@@ -2,13 +2,14 @@ import asyncio
 
 import httpx
 import pytest
-from textual.widgets import Button, Input, Markdown, Select, Static
+from textual.widgets import Button, Input, Markdown, Static, Tree
 
 from canvas_rag.answer import generate
 from canvas_rag.canvas import Canvas, record
 from canvas_rag.config import Config
 from canvas_rag.demo import seed
-from canvas_rag.ui import Browser, CanvasApp
+from canvas_rag.library import Library
+from canvas_rag.ui import CanvasApp
 
 
 @pytest.mark.parametrize('url', ['https://remote.example', 'http://192.168.1.2:11434',
@@ -72,18 +73,24 @@ async def test_demo_is_offline_and_leaves_credentials_alone(tmp_path, monkeypatc
 async def test_chat_links_only_open_known_canvas_sources(tmp_path, monkeypatch):
     c, db = seed(tmp_path)
     app = CanvasApp(c, db)
-    opened = []
+    opened, shown = [], []
     monkeypatch.setattr(app, 'open_url', opened.append)
+    monkeypatch.setattr(app, 'open_library', lambda doc=None, location=None: shown.append((doc, location)))
     try:
         async with app.run_test() as pilot:
             good = c.url + '/courses/101/pages/syllabus'
             bad = [good + '?leak=grade', good + '#secret', 'file:///etc/passwd',
-                   'https://evil.example/steal', c.url + '/courses/101/pages/invented']
+                   'https://evil.example/steal', c.url + '/courses/101/pages/invented', 'source:101:page:404']
             await app.say('[Source](' + good + ')', role='assistant')
             widget = list(app.query(Markdown))[-1]
-            for href in bad + [good]:
+            for href in bad + [good, 'source:101%3Apage%3A1#page-2']:
                 widget.post_message(Markdown.LinkClicked(widget, href))
                 await pilot.pause()
+            # Answer links open the cached copy in the Library; only it can hand a URL to the OS.
+            assert shown == [('101:page:1', None), ('101:page:1', 'page-2')] and opened == []
+            app.demo = False
+            for href in bad + [good]:
+                app.open_source(href)
             assert opened == [good]
     finally:
         db.close()
@@ -97,14 +104,16 @@ async def test_browser_filter_and_escape(tmp_path):
             app.action_browse()
             await pilot.pause()
             screen = app.screen
-            assert isinstance(screen, Browser)
+            assert isinstance(screen, Library)
             screen.query_one('#doc-filter', Input).value = 'syllabus'
             await pilot.pause()
-            screen.query_one('#doc-picker', Select).value = '101:page:1'
+            leaves = [n for n in screen.query_one('#doc-tree', Tree)._tree_lines if n.node.data]
+            assert [n.node.data for n in leaves] == ['101:page:1']
+            screen.show('101:page:1')
             await pilot.pause()
             assert not screen.query_one('#open-source', Button).disabled
             await pilot.press('escape')
-            assert not isinstance(app.screen, Browser)
+            assert not isinstance(app.screen, Library)
     finally:
         db.close()
 

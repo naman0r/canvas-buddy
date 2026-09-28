@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import replace
 import shutil
 from time import monotonic
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from rich.text import Text
 from textual import on, work
@@ -14,11 +14,12 @@ from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Mark
 
 from .answer import answer
 from .canvas import Canvas, sync
+from .library import Library, anchor
 from .store import STALE_HOURS
 
 HELP = """Home shows upcoming work and what Canvas changed in the last week. Ask about policies, deadlines, announcements, or grades; answers link to Canvas sources.
 
-**/home** dashboard · **/sync** refresh · **/changes** recent changes · **/browse** read everything cached
+**/home** dashboard · **/sync** refresh · **/changes** recent changes · **/browse** library of everything cached (Ctrl+B)
 
 **/upcoming** next 30 days · **/overdue** past-due unsubmitted work · **/grades** Canvas grades
 
@@ -26,7 +27,8 @@ HELP = """Home shows upcoming work and what Canvas changed in the last week. Ask
 
 **/provider codex|opencode|ollama [model]** change model · **/help** this guide
 
-Use the course filter to focus a question. Esc cancels work; Ctrl+Q quits.
+Use the course filter to focus a question. In the library, **Ask about this** pins a document to the
+conversation; sources under an answer open the cited page or slide. Esc cancels work; Ctrl+Q quits.
 Cache and embeddings stay on this computer. Codex/OpenCode send your question and the course
 text the model reads to their model service. Nothing is posted or submitted to Canvas.
 """
@@ -156,58 +158,16 @@ class Setup(ModalScreen):
         self.dismiss(False)
 
 
-class Browser(ModalScreen):
-    BINDINGS = [("escape", "close", "Close")]
-    CSS = """
-    Browser { align: center middle; }
-    #browser { width: 95%; height: 95%; padding: 1; border: round $accent; background: $surface; }
-    #document { height: 1fr; }
-    #document-text { height: auto; }
-    """
-
-    def __init__(self, docs):
-        super().__init__()
-        self.docs = {d["id"]: d for d in docs}
-
-    def compose(self):
-        with Vertical(id="browser"):
-            yield Label("Cached Canvas sources")
-            yield Input(placeholder="Filter by title, type, or course…", id="doc-filter")
-            yield Select([(Text(f"{d['course']} · {d['kind']} · {d['title']}"), d["id"])
-                          for d in self.docs.values()], prompt="Choose a document", id="doc-picker")
-            with VerticalScroll(id="document"):
-                yield Static("Choose a document to read its full cached text.", id="document-text", markup=False)
-            with Horizontal(classes="browser-buttons"):
-                yield Button("Open in Canvas", id="open-source", disabled=True)
-                yield Button("Close", id="close")
-
-    @on(Input.Changed, "#doc-filter")
-    def filter_documents(self, event):
-        words = event.value.casefold().split()
-        self.query_one("#doc-picker", Select).set_options([
-            (Text(f"{d['course']} · {d['kind']} · {d['title']}"), d["id"]) for d in self.docs.values()
-            if all(w in f"{d['course']} {d['kind']} {d['title']}".casefold() for w in words)])
-        self.query_one("#document-text", Static).update("Choose a matching document above.")
-        self.query_one("#open-source", Button).disabled = True
-
-    @on(Select.Changed, "#doc-picker")
-    def selected(self, event):
-        if event.value in self.docs:
-            d = self.docs[event.value]
-            self.query_one("#document-text", Static).update(
-                f"{d['title']}\n{d['url']}\nSynced {d['synced']}\n\n{d['body']}")
-            self.query_one("#document", VerticalScroll).scroll_home(animate=False)
-            self.query_one("#open-source", Button).disabled = False
-
-    @on(Button.Pressed, "#open-source")
-    def open_source(self):
-        doc = self.docs.get(self.query_one("#doc-picker", Select).value)
-        if doc:
-            self.app.open_source(doc["url"])
-
-    @on(Button.Pressed, "#close")
-    def action_close(self):
-        self.dismiss()
+def cited(reply, sources):
+    """A Sources line for documents the reply links to or the model read, each opening the Library."""
+    links, seen = [], set()
+    for s in sources:
+        if s["id"] in seen or not (s["url"] in reply or not s["excerpt"]):
+            continue
+        seen.add(s["id"])
+        label = s["title"][:48] + (f" · {s['location']}" if s.get("location") else "")
+        links.append(f"[{label}](source:{quote(s['id'])}" + (f"#{anchor(s['location'])}" if s.get("location") else "") + ")")
+    return "\n\n**Sources** · " + " · ".join(links[:8]) if links else ""
 
 
 class CanvasApp(App):
@@ -226,6 +186,8 @@ class CanvasApp(App):
     .message.assistant > .message-bar { background: #5ccfe6; }
     .message > Markdown { width: 1fr; height: auto; padding: 0 1; }
     #composer { dock: bottom; height: 6; padding: 0 1; }
+    #composer.pinned { height: 7; }
+    #pinned { display: none; height: 1; padding: 0 1; color: #f5c451; }
     #status { height: 2; padding: 0 1; color: $text-muted; }
     #status.working { color: #5ccfe6; }
     #entry { height: 3; }
@@ -247,6 +209,7 @@ class CanvasApp(App):
         self.start_setup = setup
         self.demo = demo
         self.history = []
+        self.pinned = None
         self.busy = False
         self.cancelling = False
         self.status_text = ""
@@ -267,6 +230,7 @@ class CanvasApp(App):
         yield Static("", id="snapshot", markup=False)
         yield VerticalScroll(id="chat")
         with Vertical(id="composer"):
+            yield Static("", id="pinned", markup=False)
             yield Static("", id="status", markup=False)
             with Horizontal(id="entry"):
                 yield Input(placeholder="Ask a question or reply here…  /help", id="question")
@@ -319,22 +283,48 @@ class CanvasApp(App):
     @on(Markdown.LinkClicked)
     def link_clicked(self, event):
         event.stop()
-        self.open_source(event.href)
+        # Links in answers open the cached copy in the Library, which can then open Canvas.
+        # "source:" links come from the Sources line; the id and anchor are looked up, never trusted.
+        doc, _, location = unquote(event.href.removeprefix("source:")).partition("#")
+        if event.href.startswith("source:") and self.db.get(doc):
+            self.open_library(doc, location or None)
+            return
+        row = self.db.conn.execute("SELECT id FROM documents WHERE url=? AND kind!='grade' ORDER BY kind='course'",
+                                   (unquote(event.href),)).fetchone()
+        if row and self.trusted(unquote(event.href)):
+            self.open_library(row[0])
+        else:
+            self.notify("Only cached Canvas source links can open. Use Browse to inspect sources.", severity="warning")
+
+    def trusted(self, url):
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return False
+        return (parsed.scheme == "https" and not parsed.username and not parsed.query and not parsed.fragment
+                and parsed.netloc == urlsplit(self.config.url).netloc)
 
     def open_source(self, href):
         # Never hand model-generated URLs to the OS. Only known Canvas sources can open.
         for row in self.db.conn.execute("SELECT DISTINCT url FROM documents"):
-            url = row[0]
-            try:
-                parsed = urlsplit(url)
-            except ValueError:
-                continue
-            if (unquote(url) == unquote(href) and parsed.scheme == "https" and not parsed.username
-                    and parsed.netloc == urlsplit(self.config.url).netloc
-                    and not parsed.query and not parsed.fragment and not self.demo):
-                self.open_url(url)
+            if unquote(row[0]) == unquote(href) and self.trusted(row[0]) and not self.demo:
+                self.open_url(row[0])
                 return
         self.notify("Only cached Canvas source links can open. Use Browse to inspect sources.", severity="warning")
+
+    def open_library(self, doc=None, location=None):
+        if not self.busy or doc:
+            self.push_screen(Library(self.db, None if doc else self.course, doc, location), self.pin)
+
+    def pin(self, doc_id):
+        """Pin a document to the conversation: every question until /clear includes its full text."""
+        self.pinned = doc_id or self.pinned
+        doc = self.db.get(self.pinned) if self.pinned else None
+        pin = self.query_one("#pinned", Static)
+        pin.display = bool(doc)
+        self.query_one("#composer").set_class(bool(doc), "pinned")
+        pin.update(f"About: {doc['title']} · questions include this document · /clear to unpin" if doc else "")
+        self.query_one("#question", Input).focus()
 
     def set_status(self, text):
         self.status_text = text
@@ -389,8 +379,7 @@ class CanvasApp(App):
             await self.command({"home": "/home", "coverage": "/status"}.get(event.button.id, "/" + event.button.id))
 
     def action_browse(self):
-        if not self.busy:
-            self.push_screen(Browser(self.db.documents(self.course)))
+        self.open_library()
 
     def action_refresh(self):
         if not self.busy:
@@ -465,6 +454,8 @@ class CanvasApp(App):
             await self.say("```text\n" + self.db.status() + "\n```")
         elif cmd == "/clear":
             self.history.clear()
+            self.pinned = None
+            self.pin(None)
             await self.query_one("#chat", VerticalScroll).remove_children()
             await self.say("New conversation.")
         elif cmd == "/search" and arg:
@@ -529,9 +520,9 @@ class CanvasApp(App):
                     if monotonic() - shown_at >= 0.25:
                         shown_at = monotonic()
                         bubble.update(label + text)
-                result, _ = await answer(self.config, self.db, question, self.course, self.history,
-                                         progress=self.set_status, on_text=stream)
-                await bubble.update(label + result)
+                result, sources = await answer(self.config, self.db, question, self.course, self.history,
+                                               progress=self.set_status, on_text=stream, pinned=self.pinned)
+                await bubble.update(label + result + cited(result, sources))
             if self.demo:
                 await self.say("**Canvas Buddy · sample data:**\n\n" + result, role="assistant")
             self.history.append((question, result))
