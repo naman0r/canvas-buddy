@@ -91,7 +91,7 @@ class Library(ModalScreen):
         super().__init__()
         self.db, self.course = db, course
         self.docs = {d["id"]: d for d in db.documents(course)}
-        self.names = {d["course"]: d["title"] for d in db.documents(kind="course")}
+        self.names = db.course_names()
         self.start, self.location, self.current = doc, location, None
 
     def compose(self):

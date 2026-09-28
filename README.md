@@ -78,7 +78,7 @@ Enable **Use local Ollama embeddings** in Courses setup and save/sync. The embed
 | `/sync` or Ctrl+R | Refresh content and embed changed text |
 | `/browse` or Ctrl+B | Library: each course's modules, announcements, files and pages, with a reader that jumps to PDF pages and slides. **Ask about this** pins a document to the conversation. |
 | `/search attendance` | Local search without calling a chat model |
-| `/upcoming` | Dated assignments/events in the next 30 days |
+| `/plan`, `/upcoming` or Upcoming | Planner: work by day in local time, overdue first, work with no Canvas due date last; Enter opens an item, `a` asks about it |
 | `/overdue` | Past-due assignments not submitted/graded/excused |
 | `/grades` | Canvas current/final grade values; null means not posted |
 | `/status` | Counts, timestamps, partial imports and unavailable files |

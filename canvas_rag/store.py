@@ -14,6 +14,24 @@ CHUNK_WORDS = 220
 MARKER = re.compile(r"(Page|Slide|Sheet) (\d+)")
 
 
+def short(name):
+    """Drop registrar noise from a course name: 'ACCT2301 10357 Profit Analysis SEC 05 Fall 2026
+    [BOS-1-TR]' → 'ACCT2301 Profit Analysis'. Names without that shape are returned unchanged."""
+    name = re.sub(r"\s*\[[^\]]*\]\s*$", "", name)
+    name = re.sub(r"\s+SEC\s+\S+(\s+(Fall|Spring|Summer|Winter)\b.*)?$", "", name, flags=re.I)
+    return re.sub(r"^(\S+)\s+\d{4,6}\s+", r"\1 ", name)
+
+
+def status(raw):
+    """The student's state for an assignment, in the words a planner uses."""
+    s = raw.get("submission") or {}
+    if s.get("excused"):
+        return "excused"
+    if s.get("workflow_state") in {"submitted", "graded", "pending_review"}:
+        return "late" if s.get("late") else "done"
+    return "missing" if s.get("missing") else "to do"
+
+
 def chunk(body):
     """Split text into ~CHUNK_WORDS-word chunks along its structure, as (location, heading, text):
     location spans the PDF pages or slides a chunk covers, heading is the nearest '## ' heading above it.
@@ -407,15 +425,22 @@ class Store:
                 date = datetime.fromisoformat(due.replace("Z", "+00:00"))
             except ValueError:
                 continue
-            submission = raw.get("submission") or {}
-            complete = submission.get("workflow_state") in {"submitted", "graded", "pending_review"} or submission.get("excused")
+            state = status(raw) if d["kind"] == "assignment" else "event"
+            complete = state in {"done", "late", "excused"}
             if (overdue and date < now and not complete) or (not overdue and now <= date <= end):
-                out.append({**d, "due": date.astimezone().isoformat(),
-                            "state": submission.get("workflow_state", "unknown")})
+                out.append({**d, "due": date.astimezone().isoformat(), "state": state})
         return sorted(out, key=lambda x: x["due"])
 
+    def undated(self, course=None):
+        """Unfinished assignments Canvas gives no due date: work the planner must not silently drop."""
+        return [d for d in self.documents(course, "assignment")
+                if not d["raw"].get("due_at") and status(d["raw"]) in {"to do", "missing"}]
+
+    def course_names(self):
+        return {d["course"]: short(d["title"]) for d in self.documents(kind="course")}
+
     def grades(self, course=None):
-        names = {d["course"]: d["title"] for d in self.documents(kind="course")}
+        names = self.course_names()
         lines = []
         for d in self.documents(course, "grade"):
             grades = d["raw"].get("grades") or {}
@@ -444,7 +469,7 @@ class Store:
             or "Nothing dated in the cache for this window. Try /upcoming for 30 days."))
         sections.append(self.changes_markdown(course))
         grades = []
-        names = {d["course"]: d["title"] for d in self.documents(kind="course")}
+        names = self.course_names()
         for g in self.documents(course, "grade"):
             score = (g["raw"].get("grades") or {}).get("current_score", None)
             grades.append(f"- {names.get(g['course'], g['course'])}: "

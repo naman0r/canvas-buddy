@@ -15,13 +15,14 @@ from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Mark
 from .answer import answer
 from .canvas import Canvas, sync
 from .library import Library, anchor
+from .planner import Planner
 from .store import STALE_HOURS
 
 HELP = """Home shows upcoming work and what Canvas changed in the last week. Ask about policies, deadlines, announcements, or grades; answers link to Canvas sources.
 
 **/home** dashboard · **/sync** refresh · **/changes** recent changes · **/browse** library of everything cached (Ctrl+B)
 
-**/upcoming** next 30 days · **/overdue** past-due unsubmitted work · **/grades** Canvas grades
+**/plan** or **Upcoming**: planner by day, overdue first, undated last · **/grades** Canvas grades
 
 **/search words** local search · **/status** coverage · **/clear** new conversation
 
@@ -264,7 +265,7 @@ class CanvasApp(App):
 
     def refresh_courses(self):
         self.query_one("#scope", Select).set_options([("All selected courses", 0)] +
-            [(Text(d["title"]), d["course"]) for d in self.db.documents(kind="course")])
+            [(Text(name), course) for course, name in self.db.course_names().items()])
         self.query_one("#scope", Select).value = 0
         self.query_one("#snapshot", Static).update(("DEMO · " if self.demo else "") + self.db.snapshot_summary())
 
@@ -315,6 +316,10 @@ class CanvasApp(App):
     def open_library(self, doc=None, location=None):
         if not self.busy or doc:
             self.push_screen(Library(self.db, None if doc else self.course, doc, location), self.pin)
+
+    def open_planner(self):
+        if not self.busy:
+            self.push_screen(Planner(self.db, self.course), self.pin)
 
     def pin(self, doc_id):
         """Pin a document to the conversation: every question until /clear includes its full text."""
@@ -443,11 +448,8 @@ class CanvasApp(App):
             await self.show_home()
         elif cmd == "/changes":
             await self.say(self.db.changes_markdown(self.course))
-        elif cmd in {"/upcoming", "/overdue"}:
-            rows = self.db.upcoming(self.course, overdue=cmd == "/overdue")
-            await self.say("**Cached deadlines** (local timezone; refresh with /sync)\n\n" + ("\n".join(
-                f"- {r['due']} · [{r['title']}]({r['url']}) · {r['state']}" for r in rows)
-                or "No matching dated work in the cache. Check /status for sync coverage."))
+        elif cmd in {"/upcoming", "/overdue", "/plan"}:
+            self.open_planner()
         elif cmd == "/grades":
             await self.say("**Canvas grade snapshot**\n\n" + self.db.grades(self.course))
         elif cmd == "/status":
