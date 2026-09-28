@@ -6,7 +6,7 @@ Canvas Buddy is an independent, early-stage project. Current account connection 
 
 - Canvas API operations are GET-only; the access token itself may have broader privileges. Keep it private and revoke it in Canvas if exposed.
 - Tokens live in an owner-only local file, separately from ordinary settings. They are not encrypted by this app. Local course data includes sensitive grades, feedback, and conversations.
-- Model subprocesses do not inherit Canvas environment variables. Providers are configured without action tools; these settings are defense in depth, not an OS-level guarantee against a compromised CLI.
+- Model subprocesses do not inherit Canvas environment variables. Providers are configured without action tools; the only tools offered are read-only lookups over the local cache, opened with SQLite's read-only mode and pinned to the chosen course filter. These settings are defense in depth, not an OS-level guarantee against a compromised CLI.
 - Codex/OpenCode send selected context to their model service. Ollama requests are restricted to loopback endpoints and ignore HTTP proxy environment variables in the source preview.
 - Retrieved content can contain prompt injection. Output may be wrong. The source preview opens only exact cached HTTPS Canvas links without query strings/fragments; this verifies the destination, not an answer's accuracy.
 - Files have download limits, but extraction is not yet isolated with a hard CPU/memory budget. Signed download redirects are not a full network sandbox. See the review for remaining work.

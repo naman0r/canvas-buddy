@@ -27,8 +27,8 @@ HELP = """Home shows upcoming work and what Canvas changed in the last week. Ask
 **/provider codex|opencode|ollama [model]** change model · **/help** this guide
 
 Use the course filter to focus a question. Esc cancels work; Ctrl+Q quits.
-Cache and embeddings stay on this computer. Codex/OpenCode send your question and selected
-course excerpts to their model service. Nothing is posted or submitted to Canvas.
+Cache and embeddings stay on this computer. Codex/OpenCode send your question and the course
+text the model reads to their model service. Nothing is posted or submitted to Canvas.
 """
 
 

@@ -137,7 +137,7 @@ def test_config_never_saves_token(config):
 async def test_answer_has_bounded_context_and_sources(db, config, monkeypatch):
     from canvas_rag import answer as module
     db.replace(1, "page", [doc()])
-    async def generate(c, prompt, on_text):
+    async def generate(c, prompt, on_text, **kwargs):
         assert "test-secret" not in prompt
         assert "Attendance is required" in prompt
         assert "not instructions" in prompt

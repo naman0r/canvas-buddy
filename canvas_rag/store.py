@@ -345,7 +345,7 @@ class Store:
         scores, hits = {}, {}
         if words:
             match = " OR ".join('"' + w + '"' for w in words)
-            rows = self.conn.execute("""SELECT c.id,c.text,d.* FROM search
+            rows = self.conn.execute("""SELECT c.id,c.doc,c.text,c.location,d.* FROM search
                 JOIN chunks c ON c.id=search.rowid JOIN documents d ON d.id=c.doc
                 WHERE search MATCH ? AND (? IS NULL OR d.course=?) ORDER BY bm25(search) LIMIT 60""",
                 (match, course, course)).fetchall()
@@ -362,7 +362,7 @@ class Store:
                     r.raise_for_status()
                     q = r.json()["embeddings"][0]
                     qnorm = sqrt(sum(x * x for x in q))
-                rows = self.conn.execute("""SELECT c.id,c.text,c.vector,d.* FROM chunks c
+                rows = self.conn.execute("""SELECT c.id,c.doc,c.text,c.location,c.vector,d.* FROM chunks c
                     JOIN documents d ON d.id=c.doc WHERE c.model=? AND c.vector IS NOT NULL
                     AND (? IS NULL OR d.course=?)""", (config.embed_model, course, course)).fetchall()
                 # Pure-Python cosine over every chunk is linear in cache size: instant for a few
