@@ -16,7 +16,7 @@ cd canvas-buddy
 uv run canvas-buddy demo
 ```
 
-The demo uses disposable fictional classes, never reads saved credentials, and makes no network or model calls. Replies show matching sample excerpts. Try **Upcoming**, **Grades**, and **Browse**; the browser has a filter and closes with Escape. In the regular app, a persistent timestamp/coverage summary shows how current and complete the cache is.
+The demo uses disposable fictional classes, never reads saved credentials, and makes no network or model calls. Replies show matching sample excerpts. Try **Upcoming**, **Grades**, and **Browse**; the library has a filter and closes with Escape. In the regular app, a persistent timestamp/coverage summary shows how current and complete the cache is.
 
 ## Install the released app on macOS
 
@@ -76,7 +76,7 @@ Enable **Use local Ollama embeddings** in Courses setup and save/sync. The embed
 | `/changes` | Everything Canvas posted, moved, or removed in the last 7 days |
 | `/setup` | Change Canvas connection, provider, embeddings, or courses |
 | `/sync` or Ctrl+R | Refresh content and embed changed text |
-| `/browse` or Ctrl+B | Read full cached documents |
+| `/browse` or Ctrl+B | Library: each course's modules, announcements, files and pages, with a reader that jumps to PDF pages and slides. **Ask about this** pins a document to the conversation. |
 | `/search attendance` | Local search without calling a chat model |
 | `/upcoming` | Dated assignments/events in the next 30 days |
 | `/overdue` | Past-due assignments not submitted/graded/excused |

@@ -204,12 +204,12 @@ async def test_tui_chat_browse_commands(config, db, monkeypatch):
         await pilot.pause()
         await pilot.click("#browse")
         await pilot.pause()
-        assert isinstance(app.screen, ui.Browser)
-        app.screen.query_one("#doc-picker", Select).value = "1:page:1"
+        assert isinstance(app.screen, ui.Library)
+        app.screen.show("1:page:1")
         await pilot.pause()
         await pilot.click("#close")
         await pilot.pause()
-        assert not isinstance(app.screen, ui.Browser)
+        assert not isinstance(app.screen, ui.Library)
 
 
 async def test_locked_file_never_downloaded(config):

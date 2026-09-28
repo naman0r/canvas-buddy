@@ -11,7 +11,7 @@ from datetime import datetime
 import httpx
 
 from .diagnostics import GUIDANCE
-from .tools import TOOLS, Lookup
+from .tools import TOOLS, Lookup, split
 
 
 async def generate(config, prompt, on_text=lambda text: None, lookup=None, on_tool=lambda name, args: None):
@@ -178,7 +178,7 @@ def _event(line):
 
 
 async def answer(config, db, question, course=None, history=(), progress=lambda text: None,
-                 on_text=lambda text: None):
+                 on_text=lambda text: None, pinned=None):
     if not db.documents(course):
         return "No cached course data yet. Run /setup, then /sync.", []
     progress("Searching your courses (local embeddings may be loading)…" if config.embed_model
@@ -191,6 +191,10 @@ async def answer(config, db, question, course=None, history=(), progress=lambda 
     coverage = [dict(r) for r in db.conn.execute("SELECT * FROM coverage WHERE ? IS NULL OR course IN (0,?)",
                                                (course, course))]
     coverage = [{**r, "detail": r["detail"][:300]} for r in coverage]
+    doc = db.get(pinned) if pinned else None
+    focus = (f"The student pinned this document; questions are about it unless they say otherwise. "
+             f"Its first part is below; read_document id {doc['id']} has the rest.\n"
+             f"{doc['title']} ({doc['kind']}) {doc['url']}\n{split(doc['body'])[0]}\n" if doc else "")
     need_facts = re.search(r"due|upcoming|assign|exam|quiz|grade|score|missing|late|submit|deadline|schedule|week|today|tomorrow", question, re.I)
     facts = db.facts(course) if need_facts else "\n".join(
         f"{d['course']}: {d['title']}" for d in db.documents(course, "course"))
@@ -214,7 +218,7 @@ Course filter: {course or 'all selected courses'}
 Coverage: {json.dumps(coverage)}
 Structured snapshot (for complete date/grade comparisons within the stated size limit):
 {facts}
-Retrieved sources:
+{focus}Retrieved sources:
 {json.dumps(sources, ensure_ascii=False)}
 Recent conversation:
 {json.dumps([(q[:1000], a[:1800]) for q, a in history[-3:]], ensure_ascii=False)}
@@ -224,18 +228,23 @@ User question: {question[:6000]}
         progress(f"Waiting for Ollama ({config.model or 'no model selected'}); model may be loading…")
     else:
         progress(f"Waiting for {config.provider.capitalize()} to answer…")
-    seen = {x["id"] for x in sources}
+    def read(d):
+        """Record a whole document the model saw; an empty excerpt marks it as read, not retrieved."""
+        if d and d["id"] not in {x["id"] for x in sources}:
+            sources.append({"id": d["id"], "title": d["title"], "url": d["url"], "kind": d["kind"],
+                            "course": d["course"], "location": None, "synced": d["synced"], "excerpt": ""})
+    read(doc)
+
+    lookup = Lookup(db, config, course)
 
     def on_tool(name, args):
-        doc = db.get(str(args.get("id", ""))) if name == "read_document" else None
+        opened = db.get(str(args.get("id", ""))) if name == "read_document" else None
+        opened = opened if lookup.allowed(opened) else None
+        read(opened)
         progress({"search": f"Searching your courses for “{str(args.get('query', ''))[:60]}”…",
-                  "read_document": f"Reading {doc['title'] if doc else 'a document'}…",
+                  "read_document": f"Reading {opened['title'] if opened else 'a document'}…",
                   "list_documents": "Looking through course documents…", "list_courses": "Checking your courses…",
                   "deadlines": "Checking deadlines…", "recent_changes": "Checking recent changes…"}.get(
                       name, "Looking something up…"))
-        if doc and doc["id"] not in seen:
-            seen.add(doc["id"])
-            sources.append({"id": doc["id"], "title": doc["title"], "url": doc["url"], "kind": doc["kind"],
-                            "course": doc["course"], "location": None, "synced": doc["synced"], "excerpt": ""})
-    reply = await generate(config, prompt, on_text, lookup=Lookup(db, config, course), on_tool=on_tool)
+    reply = await generate(config, prompt, on_text, lookup=lookup, on_tool=on_tool)
     return reply, sources
