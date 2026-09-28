@@ -56,7 +56,7 @@ class Lookup:
         return self.course or value or None
 
     def _names(self):
-        return {d["course"]: d["title"] for d in self.db.documents(kind="course")}
+        return self.db.course_names()
 
     def allowed(self, doc):
         return doc and (not self.course or doc["course"] in (self.course, 0))
