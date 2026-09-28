@@ -115,9 +115,14 @@ class Planner(ModalScreen):
         first = next((i for i, (_, doc) in enumerate(rows) if doc), None)
         if first is not None:
             agenda_list.highlighted = first
+        names = self.db.course_names()
+        # The student's notes often correct these dates ("48-hour extension"), so they sit above them.
+        notes = [f"{code(names[c])}: {v['notes']}" for c, v in self.db.context().items()
+                 if v["notes"] and c in names and (not self.course or c == self.course)]
         self.query_one("#planner-summary", Static).update(
             f"Next {self.days} days: {count} items on {days} days · times are local · "
-            "Enter opens · a asks about it · 1/2/3 change the window")
+            "Enter opens · a asks about it · 1/2/3 change the window"
+            + "".join(f"\nYour note · {n}" for n in notes))
         for n in (7, 14, 30):
             self.query_one(f"#w{n}", Button).variant = "primary" if n == self.days else "default"
 

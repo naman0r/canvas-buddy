@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--version", action="version", version=f"Canvas Buddy {version('canvas-buddy')}")
     parser.add_argument("command", nargs="?", default="tui", choices=[
         "tui", "demo", "courses", "setup", "sync", "ask", "search", "status", "upcoming", "grades", "digest",
-        "changes", "doctor", "self-test"])
+        "changes", "context", "doctor", "self-test"])
     parser.add_argument("question", nargs="*")
     parser.add_argument("--url", help="Canvas HTTPS site URL")
     parser.add_argument("--courses", help="Comma-separated course IDs to cache")
@@ -30,6 +30,10 @@ def main():
     parser.add_argument("--if-stale", action="store_true",
                         help=f"With sync: skip when the cache is under {STALE_HOURS} hours old")
     parser.add_argument("--days", type=int, default=14, help="With digest: upcoming window")
+    parser.add_argument("--note", help="With context --course: replace that course's notes")
+    parser.add_argument("--site", action="append", default=[], help="With context --course: add a course website")
+    parser.add_argument("--remove-site", action="append", default=[],
+                        help="With context --course: remove a course website")
     args = parser.parse_intermixed_args()
     if args.command == "self-test":
         asyncio.run(self_test())
@@ -104,6 +108,24 @@ def main():
             print(db.dashboard(args.course, days=args.days))
         elif args.command == "changes":
             print(db.changes_markdown(args.course))
+        elif args.command == "context":
+            names = db.course_names()
+            if args.note is not None or args.site or args.remove_site:
+                if args.course not in names:
+                    raise ValueError("Choose the course with --course ID; canvas-buddy context lists IDs")
+                sites = db.context().get(args.course, {"sites": []})["sites"]
+                db.set_context(args.course, notes=args.note,
+                               sites=[s for s in sites + args.site if s not in args.remove_site])
+            context = db.context()
+            for cid, name in names.items():
+                entry = context.get(cid, {"notes": "", "sites": []})
+                print(f"{cid}\t{name}\n  notes: {entry['notes'] or '(none)'}")
+                for site in entry["sites"]:
+                    print(f"  site:  {site}")
+            if args.site:
+                from .sites import sync_sites
+                await sync_sites(db, print, [args.course])
+                await db.embed(config, print)
         elif args.command == "doctor":
             await doctor(config, db)
 

@@ -14,8 +14,10 @@ from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Mark
 
 from .answer import answer
 from .canvas import Canvas, sync
+from .context import Context
 from .library import Library, anchor
 from .planner import Planner
+from .sites import sync_sites
 from .store import STALE_HOURS
 
 HELP = """Home shows upcoming work and what Canvas changed in the last week. Ask about policies, deadlines, announcements, or grades; answers link to Canvas sources.
@@ -23,6 +25,8 @@ HELP = """Home shows upcoming work and what Canvas changed in the last week. Ask
 **/home** dashboard · **/sync** refresh · **/changes** recent changes · **/browse** library of everything cached (Ctrl+B)
 
 **/plan** or **Upcoming**: planner by day, overdue first, undated last · **/grades** Canvas grades
+
+**/context** or **Context**: your notes and course websites per class, used in every answer
 
 **/search words** local search · **/status** coverage · **/clear** new conversation
 
@@ -228,6 +232,7 @@ class CanvasApp(App):
             yield Button("Upcoming", id="upcoming")
             yield Button("Grades", id="grades")
             yield Button("Coverage", id="coverage")
+            yield Button("Context", id="context")
         yield Static("", id="snapshot", markup=False)
         yield VerticalScroll(id="chat")
         with Vertical(id="composer"):
@@ -290,9 +295,9 @@ class CanvasApp(App):
         if event.href.startswith("source:") and self.db.get(doc):
             self.open_library(doc, location or None)
             return
-        row = self.db.conn.execute("SELECT id FROM documents WHERE url=? AND kind!='grade' ORDER BY kind='course'",
+        row = self.db.conn.execute("SELECT id,kind FROM documents WHERE url=? AND kind!='grade' ORDER BY kind='course'",
                                    (unquote(event.href),)).fetchone()
-        if row and self.trusted(unquote(event.href)):
+        if row and (self.trusted(unquote(event.href)) or row["kind"] == "site"):
             self.open_library(row[0])
         else:
             self.notify("Only cached Canvas source links can open. Use Browse to inspect sources.", severity="warning")
@@ -306,9 +311,11 @@ class CanvasApp(App):
                 and parsed.netloc == urlsplit(self.config.url).netloc)
 
     def open_source(self, href):
-        # Never hand model-generated URLs to the OS. Only known Canvas sources can open.
-        for row in self.db.conn.execute("SELECT DISTINCT url FROM documents"):
-            if unquote(row[0]) == unquote(href) and self.trusted(row[0]) and not self.demo:
+        # Never hand model-generated URLs to the OS. Only known Canvas sources, and pages of the course
+        # websites the student added themselves, can open.
+        for row in self.db.conn.execute("SELECT DISTINCT url, kind FROM documents"):
+            site = row[1] == "site" and urlsplit(row[0]).scheme in {"http", "https"}
+            if unquote(row[0]) == unquote(href) and (self.trusted(row[0]) or site) and not self.demo:
                 self.open_url(row[0])
                 return
         self.notify("Only cached Canvas source links can open. Use Browse to inspect sources.", severity="warning")
@@ -316,6 +323,37 @@ class CanvasApp(App):
     def open_library(self, doc=None, location=None):
         if not self.busy or doc:
             self.push_screen(Library(self.db, None if doc else self.course, doc, location), self.pin)
+
+    def open_context(self):
+        if self.demo:
+            self.notify("Demo data is fictional; course context is for your own classes.")
+        elif not self.busy:
+            self.push_screen(Context(self.db, self.course), lambda fetch: self.fetch_sites() if fetch else None)
+
+    @work(group="operation", exclusive=True)
+    async def fetch_sites(self):
+        self.begin_work("Fetching course websites…")
+        outcome = "Ready · Course websites fetched"
+        try:
+            await sync_sites(self.db, self.set_status)
+            await self.db.embed(self.config, self.set_status)
+            counts = {}
+            for d in self.db.documents(kind="site"):
+                counts[d["course"]] = counts.get(d["course"], 0) + 1
+            names = self.db.course_names()
+            problems = [f"{names.get(r['course'], r['course'])}: {r['detail']}" for r in self.db.conn.execute(
+                "SELECT course,detail FROM coverage WHERE kind='site' AND state!='ok'")]
+            await self.say("**Course websites**\n\n" + ("\n".join(
+                f"- {names.get(c, c)}: {n} pages cached" for c, n in counts.items()) or "No pages cached.")
+                + ("\n\n" + "\n".join(f"- {p[:300]}" for p in problems) if problems else ""))
+        except asyncio.CancelledError:
+            outcome = "Cancelled · Pages fetched so far remain cached"
+            raise
+        except Exception as e:
+            outcome = "Fetch failed · See message above"
+            await self.say(f"Could not fetch course websites: {self.config.error(e)}")
+        finally:
+            self.finish_work(outcome)
 
     def open_planner(self):
         if not self.busy:
@@ -351,14 +389,16 @@ class CanvasApp(App):
         self.cancelling = False
         self.started_at = monotonic()
         self.query_one("#cancel-work", Button).disabled = False
-        for selector in ("#scope", "#setup", "#sync", "#browse", "#home", "#upcoming", "#grades", "#coverage"):
+        for selector in ("#scope", "#setup", "#sync", "#browse", "#home", "#upcoming", "#grades", "#coverage",
+                         "#context"):
             self.query_one(selector).disabled = True
         self.set_status(message)
 
     def finish_work(self, message):
         self.busy = False
         self.query_one("#cancel-work", Button).disabled = True
-        for selector in ("#scope", "#setup", "#sync", "#browse", "#home", "#upcoming", "#grades", "#coverage"):
+        for selector in ("#scope", "#setup", "#sync", "#browse", "#home", "#upcoming", "#grades", "#coverage",
+                         "#context"):
             self.query_one(selector).disabled = False
         self.set_status(message)
         self.query_one("#question", Input).focus()
@@ -380,6 +420,8 @@ class CanvasApp(App):
             self.action_browse()
         elif event.button.id == "cancel-work":
             self.action_cancel()
+        elif event.button.id == "context":
+            self.open_context()
         elif event.button.id in {"home", "upcoming", "grades", "coverage"}:
             await self.command({"home": "/home", "coverage": "/status"}.get(event.button.id, "/" + event.button.id))
 
@@ -448,6 +490,8 @@ class CanvasApp(App):
             await self.show_home()
         elif cmd == "/changes":
             await self.say(self.db.changes_markdown(self.course))
+        elif cmd == "/context":
+            self.open_context()
         elif cmd in {"/upcoming", "/overdue", "/plan"}:
             self.open_planner()
         elif cmd == "/grades":
