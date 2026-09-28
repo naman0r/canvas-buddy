@@ -440,3 +440,12 @@ async def test_second_escape_does_not_interrupt_cancellation(config, db, monkeyp
         await pilot.press("escape")
         assert await settles(pilot, lambda: not app.busy)
         assert cancels == [1, 2]
+
+
+def test_reuploaded_file_is_one_replacement_and_signed_urls_are_not_changes(db):
+    def file(id, title, session):
+        return record(1, "file", {"id": id, "display_name": title, "canvadoc_session_url": session}, BASE, title)
+    synced(db, 1, "file", [file(1, "Lecture 1.pdf", "a"), file(2, "Old.pdf", "a")])
+    synced(db, 1, "file", [file(3, "Lecture 1.pdf", "b"), file(2, "Old.pdf", "b")])
+    assert [(c["change"], c["title"], c["detail"]) for c in db.changes()] == [
+        ("changed", "Lecture 1.pdf", "replaced with a new upload")]

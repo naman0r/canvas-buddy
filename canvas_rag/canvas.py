@@ -14,14 +14,31 @@ from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
 
+BLOCKS = ["p", "div", "section", "article", "blockquote", "pre", "table", "tr", "ul", "ol", "li",
+          "h1", "h2", "h3", "h4", "h5", "h6", "hr"]
+
+
 def plain(value):
+    """Text of Canvas HTML with its structure kept: one line per block, '## ' headings, '- ' list items."""
     value = str(value) if value is not None else ""
     if "<" not in value:
         return value
     soup = BeautifulSoup(value, "html.parser")
-    for tag in soup(["script", "style"]):
+    for tag in soup(["script", "style", "link"]):
         tag.decompose()
-    return re.sub(r"[ \t]+", " ", soup.get_text("\n", strip=True)).strip()
+    for tag in soup.find_all("br"):
+        tag.replace_with("\n")
+    for tag in soup.find_all(["td", "th"]):
+        tag.insert_after(" | ")
+    for tag in soup.find_all(BLOCKS):
+        if tag.name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            tag.insert(0, "## ")
+        elif tag.name == "li":
+            tag.insert(0, "- ")
+        tag.insert_before("\n")
+        tag.insert_after("\n")
+    lines = (re.sub(r"[ \t\xa0]+", " ", line).strip(" |") for line in soup.get_text().splitlines())
+    return "\n".join(line for line in lines if line)
 
 
 def readable(value):
@@ -33,6 +50,148 @@ def readable(value):
     return plain(value)
 
 
+def local_time(value):
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%a %b %d %Y, %I:%M %p %Z")
+    except (AttributeError, ValueError):
+        return None
+
+
+def fields(*pairs):
+    return "\n".join(f"{label}: {value}" for label, value in pairs if value not in (None, "", [], False))
+
+
+def describe(kind, item):
+    """What a student would read on the Canvas page, not the API envelope around it. Model prompts,
+    embeddings and the reader all use this text, so ids, flags and signed parameters stay out."""
+    g = item.get
+    if kind == "course":
+        return fields(("Course", g("name")), ("Code", g("course_code")), ("Term", (g("term") or {}).get("name"))) + (
+            "\n\n## Syllabus\n" + plain(g("syllabus_body")) if g("syllabus_body") else "")
+    if kind == "assignment":
+        s = g("submission") or {}
+        attempts = g("allowed_attempts")
+        return (fields(("Due", local_time(g("due_at"))), ("Available from", local_time(g("unlock_at"))),
+                       ("Closes", local_time(g("lock_at"))), ("Points", g("points_possible")),
+                       ("Submit as", ", ".join(t.replace("_", " ") for t in g("submission_types") or [])),
+                       ("Attempts", "unlimited" if attempts == -1 else attempts),
+                       ("Your status", s.get("workflow_state")), ("Your score", s.get("score")),
+                       ("Late", s.get("late")), ("Missing", s.get("missing")))
+                + "\n\n" + plain(g("description"))).strip()
+    if kind == "quiz":
+        return (fields(("Due", local_time(g("due_at"))), ("Available from", local_time(g("unlock_at"))),
+                       ("Closes", local_time(g("lock_at"))), ("Points", g("points_possible")),
+                       ("Questions", g("question_count")),
+                       ("Time limit", f"{g('time_limit')} minutes" if g("time_limit") else None),
+                       ("Attempts", "unlimited" if g("allowed_attempts") == -1 else g("allowed_attempts")))
+                + "\n\n" + plain(g("description"))).strip()
+    if kind in {"announcement", "discussion"}:
+        text = (fields(("Posted", local_time(g("posted_at"))), ("By", g("user_name")),
+                       ("Due", local_time((g("assignment") or {}).get("due_at"))))
+                + "\n\n" + plain(g("message"))).strip()
+        thread = g("thread") or {}
+        names = {p.get("id"): p.get("display_name") for p in thread.get("participants") or []}
+
+        def replies(entries, depth):
+            out = []
+            for e in entries or []:
+                if e.get("message") and not e.get("deleted"):
+                    out.append("  " * depth + f"- {names.get(e.get('user_id'), 'Someone')}: "
+                               + " ".join(plain(e["message"]).split()))
+                out += replies(e.get("replies"), depth + 1)
+            return out
+        posts = replies(thread.get("view"), 0)
+        return text + ("\n\n## Replies\n" + "\n".join(posts) if posts else "")
+    if kind == "page":
+        return plain(g("body"))
+    if kind == "module":
+        items = "\n".join("  " * (i.get("indent") or 0) + f"- {i.get('title')}"
+                          + (f" ({i['type']})" if i.get("type") not in {None, "SubHeader"} else "")
+                          for i in g("items") or [])
+        return (fields(("Unlocks", local_time(g("unlock_at")))) + "\n\n" + items).strip()
+    if kind == "grade":
+        grades = g("grades") or {}
+        return fields(("Current score", grades.get("current_score")), ("Current grade", grades.get("current_grade")),
+                      ("Final score", grades.get("final_score")), ("Final grade", grades.get("final_grade"))) \
+            or "No grade posted yet"
+    if kind == "weight":
+        rules = g("rules") or {}
+        return fields(("Weight", f"{g('group_weight')}% of the course grade" if g("group_weight") else None),
+                      ("Drop lowest", rules.get("drop_lowest")), ("Drop highest", rules.get("drop_highest")))
+    if kind == "teacher":
+        return fields(("Teaching staff", g("name")), ("Pronouns", g("pronouns")), ("Email", g("email")))
+    if kind == "submission":
+        comments = "\n".join(f"- {c.get('author_name', 'Someone')} ({local_time(c.get('created_at'))}): "
+                             f"{c.get('comment', '')}" for c in g("submission_comments") or [])
+        rubric = "\n".join(f"- {v.get('points')} points" + (f": {v['comments']}" if v.get("comments") else "")
+                           for v in (g("rubric_assessment") or {}).values() if isinstance(v, dict))
+        return (fields(("Status", g("workflow_state")), ("Submitted", local_time(g("submitted_at"))),
+                       ("Score", g("score")), ("Grade", g("grade")), ("Late", g("late")), ("Missing", g("missing")),
+                       ("Excused", g("excused")))
+                + ("\n\n## Comments\n" + comments if comments else "")
+                + ("\n\n## Rubric\n" + rubric if rubric else "")).strip()
+    if kind == "event":
+        return (fields(("Starts", local_time(g("start_at"))), ("Ends", local_time(g("end_at"))),
+                       ("Where", g("location_name")), ("Address", g("location_address")))
+                + "\n\n" + plain(g("description"))).strip()
+    if kind == "todo":
+        work = g("assignment") or g("quiz") or {}
+        return fields(("To do", g("type")), ("Due", local_time(work.get("due_at"))))
+    if kind == "inbox":
+        names = {p.get("id"): p.get("name") for p in g("participants") or []}
+        return "\n\n".join(f"{names.get(m.get('author_id'), 'Someone')} ({local_time(m.get('created_at'))}):\n"
+                            f"{plain(m.get('body'))}" for m in reversed(g("messages") or []))
+    return readable(item)
+
+
+def _local(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def _office_text(z, names, kind):
+    """Office XML to text with paragraph breaks; slides/sheets are numbered so chunks can cite them."""
+    if kind == "xlsx":
+        shared = []
+        if (0, "xl/sharedStrings.xml") in names:
+            shared = ["".join(t.text or "" for t in si.iter() if _local(t.tag) == "t")
+                      for si in ElementTree.fromstring(z.read("xl/sharedStrings.xml")) if _local(si.tag) == "si"]
+        out = []
+        for number, name in names:
+            if name == "xl/sharedStrings.xml":
+                continue
+            rows = []
+            for row in ElementTree.fromstring(z.read(name)).iter():
+                if _local(row.tag) != "row":
+                    continue
+                cells = []
+                for c in row:
+                    value = next((v.text for v in c if _local(v.tag) == "v"), None)
+                    if c.get("t") == "s" and value is not None and value.isdigit() and int(value) < len(shared):
+                        value = shared[int(value)]
+                    elif c.get("t") == "inlineStr":
+                        value = "".join(t.text or "" for t in c.iter() if _local(t.tag) == "t")
+                    if value:
+                        cells.append(value)
+                if cells:
+                    rows.append(" | ".join(cells))
+            out.append(f"Sheet {number}\n" + "\n".join(rows))
+        return "\n\n".join(out)
+    out = []
+    for number, name in names:
+        paragraphs = []
+        for p in ElementTree.fromstring(z.read(name)).iter():
+            if _local(p.tag) != "p":
+                continue
+            text = "".join(t.text or "" for t in p.iter() if _local(t.tag) == "t").strip()
+            style = next((s.get(next((k for k in s.attrib if _local(k) == "val"), "")) or ""
+                          for s in p.iter() if _local(s.tag) == "pStyle"), "")
+            if text:
+                paragraphs.append(("## " if style.lower().startswith(("heading", "title")) else "") + text)
+        text = "\n".join(paragraphs)
+        out.append(f"Slide {number}\n{text}" if kind == "pptx" else text)
+    return "\n\n".join(out)
+
+
 def extract(data, name):
     suffix = name.lower().rsplit(".", 1)[-1]
     if suffix == "pdf":
@@ -40,12 +199,16 @@ def extract(data, name):
                            for i, page in enumerate(PdfReader(io.BytesIO(data)).pages))
     if suffix in {"docx", "pptx", "xlsx"}:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            names = sorted(n for n in z.namelist() if
-                           n == "word/document.xml" or re.fullmatch(r"ppt/slides/slide\d+\.xml", n)
-                           or n == "xl/sharedStrings.xml" or re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n))
-            if sum(z.getinfo(n).file_size for n in names) > 80_000_000:
+            pattern = {"docx": r"word/document()\.xml", "pptx": r"ppt/slides/slide(\d+)\.xml",
+                       "xlsx": r"xl/sharedStrings()\.xml|xl/worksheets/sheet(\d+)\.xml"}[suffix]
+            names = []
+            for n in z.namelist():
+                if m := re.fullmatch(pattern, n):
+                    names.append((int(next((x for x in m.groups() if x), 0)), n))
+            names.sort()  # Numerically: slide10 must follow slide9, not slide1.
+            if sum(z.getinfo(n).file_size for _, n in names) > 80_000_000:
                 raise ValueError("Office document expands beyond 80 MB")
-            return "\n".join(" ".join(ElementTree.fromstring(z.read(n)).itertext()) for n in names)
+            return _office_text(z, names, suffix)
     return plain(data.decode("utf-8", errors="replace"))
 
 
@@ -143,9 +306,10 @@ class Canvas:
         raise RuntimeError("Too many file redirects")
 
 
-def record(course, kind, item, base, body=None):
+def record(course, kind, item, base, body=None, title=None):
     key = str(item.get("id", item.get("url", "self")))
-    title = item.get("title") or item.get("name") or item.get("display_name") or item.get("subject") or kind
+    title = title or item.get("title") or item.get("name") or item.get("display_name") or item.get("subject") or kind
+    title = " ".join(title.split())
     url = item.get("html_url") or f"{base}/courses/{course}"
     if kind == "file":
         url = f"{base}/courses/{course}/files/{key}"
@@ -156,7 +320,7 @@ def record(course, kind, item, base, body=None):
     elif kind == "inbox":
         url = f"{base}/conversations/{key}"
     return {"id": f"{course}:{kind}:{key}", "course": course, "kind": kind, "title": title,
-            "url": url, "body": body if body is not None else readable(item), "raw": item}
+            "url": url, "body": body if body is not None else describe(kind, item), "raw": item}
 
 
 async def sync(config, db, progress=lambda s: None):
@@ -174,6 +338,8 @@ async def _sync(config, db, progress):
         me = await api.one("users/self/profile")
         db.bind(config.url, str(me["id"]))
         db.prune_courses(config.courses)
+        # Files extracted by an older extractor are downloaded again once, so improvements reach them.
+        fresh = db.meta("extract_version") == EXTRACT_VERSION
         async def collect(cid, kind, fetch):
             progress(f"{cid or 'Personal'} · {kind}")
             try:
@@ -191,7 +357,7 @@ async def _sync(config, db, progress):
         limit = asyncio.Semaphore(SYNC_CONCURRENCY)
         async def sync_course(cid):
             async with limit:
-                await _sync_course(api, db, me, cid, collect)
+                await _sync_course(api, db, me, cid, collect, fresh)
         # TaskGroup cancels the siblings when one course raises; a plain gather would leave them
         # running against the closed client and record bogus coverage errors.
         try:
@@ -210,6 +376,7 @@ async def _sync(config, db, progress):
                 out.append(record(0, "inbox", full, api.base))
             return out
         await collect(0, "inbox", inbox)
+    db.set_meta("extract_version", EXTRACT_VERSION)
     progress("Indexing new and changed text…")
     await db.embed(config, progress)
     db.prune_changes()
@@ -217,10 +384,11 @@ async def _sync(config, db, progress):
     progress("Sync complete. /status shows coverage and any unavailable content.")
 
 
+EXTRACT_VERSION = "2"
 SYNC_CONCURRENCY = 3  # Canvas throttles per token; three courses at once stays well under it.
 
 
-async def _sync_course(api, db, me, cid, collect):
+async def _sync_course(api, db, me, cid, collect, fresh):
     prefix = f"courses/{cid}"
     async def course():
         c = await api.one(prefix, {"include[]": ["syllabus_body", "total_scores", "term"]})
@@ -242,8 +410,10 @@ async def _sync_course(api, db, me, cid, collect):
     async def submissions():
         items = await api.all(f"{prefix}/students/submissions", {
             "student_ids[]": [me["id"]], "include[]": ["submission_comments", "rubric_assessment"]})
-        return [record(cid, "submission", {**i, "id": i["assignment_id"],
-                "title": f"Submission / feedback for assignment {i['assignment_id']}"}, api.base) for i in items]
+        names = {d["raw"].get("id"): d["title"] for d in db.documents(cid, "assignment")}
+        return [record(cid, "submission", {**i, "id": i["assignment_id"]}, api.base,
+                       title=f"Feedback: {names.get(i['assignment_id'], 'assignment ' + str(i['assignment_id']))}")
+                for i in items]
     await collect(cid, "submission", submissions)
 
     async def modules():
@@ -300,10 +470,12 @@ async def _sync_course(api, db, me, cid, collect):
                 old = db.get(f"{cid}:file:{key}")
                 unchanged = old and all(old["raw"].get(k) == item.get(k)
                                         for k in ("updated_at", "size", "locked_for_user"))
-                if unchanged and "[Extraction failed:" not in old["body"]:
+                if unchanged and fresh and "[Extraction failed:" not in old["body"]:
                     body = old["body"]
                 else:
-                    body = readable({k: item.get(k) for k in ("display_name", "content-type", "size")})
+                    size = item.get("size")
+                    body = fields(("File", item.get("display_name")), ("Type", item.get("content-type")),
+                                  ("Size", f"{size / 1e6:.1f} MB" if size else None))
                     try:
                         body += "\n\n" + await api.file_text(item)
                     except Exception:
